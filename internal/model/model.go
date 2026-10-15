@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // All X IDs cross process and storage boundaries as decimal strings.
 type Context struct {
@@ -22,6 +25,21 @@ type Post struct {
 	ReplyToID string    `json:"reply_to_id,omitempty"`
 	Parent    *Context  `json:"parent,omitempty"`
 	Quote     *Context  `json:"quote,omitempty"`
+}
+
+// ResetAssessment is an AI estimate, not confirmation that a reset happened.
+// A nil probability means unavailable, which must never be displayed as 0%.
+type ResetAssessment struct {
+	Probability  *float64  `json:"probability,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	EvaluatedAt  time.Time `json:"evaluated_at"`
+	HistoryCount int       `json:"history_count"`
+}
+
+func (a ResetAssessment) Valid() bool {
+	return a.Probability != nil && !math.IsNaN(*a.Probability) && !math.IsInf(*a.Probability, 0) &&
+		*a.Probability >= 0 && *a.Probability <= 1 && a.Model != "" && len(a.Model) <= 128 &&
+		!a.EvaluatedAt.IsZero() && a.HistoryCount >= 0 && a.HistoryCount <= 10
 }
 
 type FetchRequest struct {

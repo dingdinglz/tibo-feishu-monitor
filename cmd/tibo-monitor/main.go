@@ -21,6 +21,7 @@ import (
 	"tibo-monitor/internal/monitor"
 	"tibo-monitor/internal/scrape"
 	"tibo-monitor/internal/store"
+	"tibo-monitor/internal/typesafe"
 )
 
 func main() {
@@ -143,7 +144,10 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	if upgraded > 0 {
 		log.Info("pending_posts_upgraded_to_cards", "deliveries", upgraded)
 	}
-	m := monitor.Monitor{Config: c, Store: s, Fetcher: fetcher, Sender: feishu.New(c.Delivery.Timeout), Log: log, Debug: *debug}
+	if c.TypeSafe.APIKey == "" {
+		log.Warn("typesafe_not_configured", "hint", "set TYPESAFE_API_KEY; reset probability will be shown as unavailable until configured")
+	}
+	m := monitor.Monitor{Config: c, Store: s, Fetcher: fetcher, Sender: feishu.New(c.Delivery.Timeout), Log: log, Debug: *debug, Assessor: typesafe.New(c.TypeSafe)}
 	log.Info("monitor_started", "target", c.Target.Username, "interval", c.Poll.Interval, "jitter", "1s..30s", "debug", *debug)
 	return m.Run(ctx)
 }

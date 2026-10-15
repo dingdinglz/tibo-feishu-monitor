@@ -92,16 +92,25 @@ func allContent(card cardView) string {
 }
 
 func originalText(card cardView) string {
-	first := card.Body.Elements[0].(map[string]any)
-	column := first["columns"].([]any)[0].(map[string]any)
-	for _, element := range column["elements"].([]any) {
-		obj := element.(map[string]any)
-		if obj["tag"] != "div" {
+	for _, element := range card.Body.Elements {
+		group := element.(map[string]any)
+		if group["tag"] != "column_set" {
 			continue
 		}
-		text := obj["text"].(map[string]any)
-		if _, secondary := text["text_size"]; !secondary {
-			return text["content"].(string)
+		column := group["columns"].([]any)[0].(map[string]any)
+		elements := column["elements"].([]any)
+		if elements[0].(map[string]any)["content"] != "**原文**" {
+			continue
+		}
+		for _, element := range elements {
+			obj := element.(map[string]any)
+			if obj["tag"] != "div" {
+				continue
+			}
+			text := obj["text"].(map[string]any)
+			if _, secondary := text["text_size"]; !secondary {
+				return text["content"].(string)
+			}
 		}
 	}
 	return ""
@@ -210,7 +219,7 @@ func TestCardTypesContextsAndSafeContent(t *testing.T) {
 			walkElements(card.Body.Elements, func(node map[string]any) {
 				if node["tag"] == "markdown" {
 					content := node["content"]
-					if content != "**原文**" && content != "**回复上下文**" && content != "**引用内容**" {
+					if content != "**原文**" && content != "**回复上下文**" && content != "**引用内容**" && content != "**本次额度重置概率**" {
 						t.Fatal("untrusted text used as markdown")
 					}
 				}

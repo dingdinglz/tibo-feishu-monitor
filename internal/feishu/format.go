@@ -24,10 +24,33 @@ var loginName = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 // Persist content, not credentials, keyword prefixes or signatures. Render the
 // actual card on each attempt so changed prefixes and secrets also affect retries.
 type cardRecord struct {
-	Version string      `json:"tibo_card"`
-	Post    *model.Post `json:"post,omitempty"`
-	Debug   bool        `json:"debug,omitempty"`
-	Notice  string      `json:"notice,omitempty"`
+	Version string                 `json:"tibo_card"`
+	Post    *model.Post            `json:"post,omitempty"`
+	Debug   bool                   `json:"debug,omitempty"`
+	Notice  string                 `json:"notice,omitempty"`
+	Reset   *model.ResetAssessment `json:"reset_assessment,omitempty"`
+}
+
+// CardPost returns the evidence for a post card, including debug replays. Text
+// alerts, synthetic notices and invalid records are left to the normal sender.
+func CardPost(text string) *model.Post {
+	record, _, err := decodeCard(text)
+	if err != nil {
+		return nil
+	}
+	return record.Post
+}
+
+func WithResetAssessment(text string, assessment model.ResetAssessment) (string, error) {
+	record, isCard, err := decodeCard(text)
+	if err != nil {
+		return "", err
+	}
+	if !isCard || record.Post == nil || !assessment.Valid() {
+		return "", errors.New("feishu: invalid_reset_assessment")
+	}
+	record.Reset = &assessment
+	return encodeCard(record)
 }
 
 // Format always returns exactly one durable message per post. Oversize content

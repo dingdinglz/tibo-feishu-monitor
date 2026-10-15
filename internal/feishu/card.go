@@ -2,7 +2,10 @@ package feishu
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"strconv"
+	"strings"
 	"time"
 	_ "time/tzdata"
 
@@ -90,6 +93,22 @@ func contextGroup(label string, c model.Context) map[string]any {
 	return group(label, "grey-50", paragraph(text), openButton("查看上下文", postURL(c.ID, c.Author), false))
 }
 
+func resetGroup(a *model.ResetAssessment, color string) map[string]any {
+	if a == nil || !a.Valid() {
+		return group("本次额度重置概率", "grey-50", paragraph("暂不可用"),
+			secondary("TypeSafe 未返回有效概率；未使用模拟值。"))
+	}
+	probability := math.Abs(*a.Probability) // normalize a valid IEEE negative zero
+	filled := int(math.Round(probability * 10))
+	percent := strings.TrimSuffix(strconv.FormatFloat(probability*100, 'f', 1, 64), ".0")
+	bar := plain(strings.Repeat("█", filled) + strings.Repeat("░", 10-filled) + "  " + percent + "%")
+	bar.TextSize = "heading-3"
+	bar.TextColor = color
+	return group("本次额度重置概率", color+"-50", map[string]any{"tag": "div", "text": bar},
+		secondary(fmt.Sprintf("TypeSafe · %s · 参考此前 %d 条动态", a.Model, a.HistoryCount)),
+		secondary("AI 估计本条动态是否预告或确认 Codex 额度重置，并非重置保证。"))
+}
+
 func renderCard(record cardRecord, prefix, body string, truncated bool) cardView {
 	var card cardView
 	card.Schema = "2.0"
@@ -143,7 +162,7 @@ func renderCard(record cardRecord, prefix, body string, truncated bool) cardView
 	}
 	if p := record.Post; p != nil {
 		original = append(original, secondary("ID："+p.ID))
-		card.Body.Elements = append(card.Body.Elements, group("原文", color+"-50", original...))
+		card.Body.Elements = append(card.Body.Elements, resetGroup(record.Reset, color), group("原文", color+"-50", original...))
 		if p.Parent != nil {
 			card.Body.Elements = append(card.Body.Elements, contextGroup("回复上下文", *p.Parent))
 		}

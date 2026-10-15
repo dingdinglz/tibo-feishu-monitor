@@ -22,13 +22,19 @@ type Sender interface {
 	Send(context.Context, config.Destination, string) error
 }
 
+type Assessor interface {
+	Assess(context.Context, model.Post, []model.Post) (model.ResetAssessment, error)
+}
+
 type Monitor struct {
-	Config  config.Config
-	Store   *store.Store
-	Fetcher Fetcher
-	Sender  Sender
-	Log     *slog.Logger
-	Debug   bool
+	Config       config.Config
+	Store        *store.Store
+	Fetcher      Fetcher
+	Sender       Sender
+	Log          *slog.Logger
+	Debug        bool
+	Assessor     Assessor
+	assessmentMu sync.Mutex // coalesce per-post/multi-destination inference before sending
 }
 
 type PollResult struct {
@@ -210,7 +216,11 @@ func (m *Monitor) deliver(ctx context.Context, d config.Destination) error {
 			}
 			continue
 		}
-		err = m.Sender.Send(ctx, d, job.Text)
+		text, err := m.prepareCard(ctx, *job)
+		if err != nil {
+			return err
+		}
+		err = m.Sender.Send(ctx, d, text)
 		if ctx.Err() != nil {
 			break
 		} // unacknowledged job remains pending

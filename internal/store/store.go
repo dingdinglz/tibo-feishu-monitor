@@ -32,6 +32,7 @@ type ScanState struct {
 type Job struct {
 	ID          int64
 	Destination string
+	DedupKey    string
 	Text        string
 	Kind        string
 	Attempts    int
@@ -62,6 +63,8 @@ CREATE TABLE IF NOT EXISTS destinations (
 CREATE TABLE IF NOT EXISTS posts (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, discovered_at INTEGER NOT NULL, data TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at, length(id), id);
+CREATE TABLE IF NOT EXISTS reset_assessments (key TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contexts (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
  id INTEGER PRIMARY KEY AUTOINCREMENT, dedup_key TEXT NOT NULL UNIQUE,
@@ -427,8 +430,8 @@ func (s *Store) Claim(ctx context.Context, dest string, now time.Time, interval 
 	}
 	var j Job
 	var next int64
-	err = tx.QueryRowContext(ctx, `SELECT id,destination,body,kind,attempts,next_attempt FROM outbox WHERE destination=? AND status='pending'
-ORDER BY CASE kind WHEN 'alert' THEN 0 WHEN 'debug' THEN 2 ELSE 1 END, created_at, length(post_id), post_id, part, id LIMIT 1`, dest).Scan(&j.ID, &j.Destination, &j.Text, &j.Kind, &j.Attempts, &next)
+	err = tx.QueryRowContext(ctx, `SELECT id,destination,dedup_key,body,kind,attempts,next_attempt FROM outbox WHERE destination=? AND status='pending'
+ORDER BY CASE kind WHEN 'alert' THEN 0 WHEN 'debug' THEN 2 ELSE 1 END, created_at, length(post_id), post_id, part, id LIMIT 1`, dest).Scan(&j.ID, &j.Destination, &j.DedupKey, &j.Text, &j.Kind, &j.Attempts, &next)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

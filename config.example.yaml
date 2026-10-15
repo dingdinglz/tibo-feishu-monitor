@@ -20,6 +20,15 @@ scrape:
   max_pages: 5                 # includes refreshed head during continuation; minimum 2
   context_limit: 4             # max extra tweet_details calls per poll
 
+# All post/reply/quote cards (including run -debug) use the real TypeSafe API.
+# Empty api_key reads TYPESAFE_API_KEY; missing key/service failures show unavailable, never a fake percentage.
+typesafe:
+  api_key: ""                 # recommended: export TYPESAFE_API_KEY; or ${TYPESAFE_API_KEY}
+  model: jev-latest
+  timeout: 15s                 # total inference budget, including bounded retries
+  recent_posts: 8              # preceding target posts used as context, 1..10
+  history_window: 72h          # relative to the current post, not delivery time
+
 delivery:
   timeout: 10s
   send_interval: 1s            # per destination, includes alerts

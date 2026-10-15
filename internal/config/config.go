@@ -44,7 +44,16 @@ type Config struct {
 		FailureThreshold int           `yaml:"failure_threshold"`
 		Cooldown         time.Duration `yaml:"cooldown"`
 	} `yaml:"alerts"`
+	TypeSafe TypeSafe      `yaml:"typesafe"`
 	Webhooks []Destination `yaml:"webhooks"`
+}
+
+type TypeSafe struct {
+	APIKey        string        `yaml:"api_key"`
+	Model         string        `yaml:"model"`
+	Timeout       time.Duration `yaml:"timeout"`
+	RecentPosts   int           `yaml:"recent_posts"`
+	HistoryWindow time.Duration `yaml:"history_window"`
 }
 
 type Destination struct {
@@ -76,6 +85,7 @@ func Defaults() Config {
 	c.Delivery.SendInterval = time.Second
 	c.Alerts.FailureThreshold = 3
 	c.Alerts.Cooldown = 30 * time.Minute
+	c.TypeSafe = TypeSafe{Model: "jev-latest", Timeout: 15 * time.Second, RecentPosts: 8, HistoryWindow: 72 * time.Hour}
 	return c
 }
 
@@ -83,6 +93,7 @@ var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 var numberPattern = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
+var modelPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func expand(s string) (string, error) {
 	var missing bool
@@ -192,6 +203,26 @@ func Load(path string, probe bool) (Config, error) {
 	}
 	if c.Alerts.FailureThreshold < 1 || c.Alerts.Cooldown < time.Minute {
 		return c, errors.New("invalid alerts threshold or cooldown")
+	}
+	if c.TypeSafe.Timeout < time.Second || c.TypeSafe.Timeout > time.Minute ||
+		c.TypeSafe.RecentPosts < 1 || c.TypeSafe.RecentPosts > 10 ||
+		c.TypeSafe.HistoryWindow < time.Hour || c.TypeSafe.HistoryWindow > 30*24*time.Hour {
+		return c, errors.New("invalid typesafe timing/history (timeout 1s..1m, recent_posts 1..10, history_window 1h..720h)")
+	}
+	if !modelPattern.MatchString(c.TypeSafe.Model) {
+		return c, errors.New("invalid typesafe.model")
+	}
+	if probe {
+		c.TypeSafe.APIKey = "" // probe/status never need or expose inference credentials
+	} else {
+		c.TypeSafe.APIKey, err = expand(c.TypeSafe.APIKey)
+		if err != nil {
+			return c, fmt.Errorf("typesafe.api_key: %w", err)
+		}
+		if c.TypeSafe.APIKey == "" {
+			c.TypeSafe.APIKey = os.Getenv("TYPESAFE_API_KEY")
+		}
+		c.TypeSafe.APIKey = strings.TrimSpace(c.TypeSafe.APIKey)
 	}
 	seen := map[string]bool{}
 	urls := map[string]bool{}
