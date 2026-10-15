@@ -27,14 +27,15 @@ type Assessor interface {
 }
 
 type Monitor struct {
-	Config       config.Config
-	Store        *store.Store
-	Fetcher      Fetcher
-	Sender       Sender
-	Log          *slog.Logger
-	Debug        bool
-	Assessor     Assessor
-	assessmentMu sync.Mutex // coalesce per-post/multi-destination inference before sending
+	Config        config.Config
+	Store         *store.Store
+	Fetcher       Fetcher
+	ResetProvider ResetProvider
+	Sender        Sender
+	Log           *slog.Logger
+	Debug         bool
+	Assessor      Assessor
+	assessmentMu  sync.Mutex // coalesce per-post/multi-destination inference before sending
 }
 
 type PollResult struct {
@@ -49,6 +50,17 @@ func Jitter() time.Duration {
 		return 15 * time.Second
 	}
 	return time.Duration(n.Int64()+1) * time.Second
+}
+
+// Preserve very large server cooldowns without overflowing into a negative
+// timer when adding jitter (which would otherwise immediately retry).
+func jittered(delay time.Duration) time.Duration {
+	const maximum = time.Duration(1<<63 - 1)
+	jitter := Jitter()
+	if delay > maximum-jitter {
+		return maximum
+	}
+	return delay + jitter
 }
 
 func Backoff(initial, maximum time.Duration, failures int) time.Duration {
@@ -71,6 +83,9 @@ func (m *Monitor) fault(ctx context.Context, key, detail, exclude string, thresh
 }
 
 func (m *Monitor) Poll(ctx context.Context, now time.Time) (PollResult, error) {
+	if m.Config.UsesCodexResets() {
+		return m.pollResets(ctx, now)
+	}
 	var outcome PollResult
 	c := m.Config
 	state, err := m.Store.State(ctx)
@@ -267,7 +282,17 @@ func (m *Monitor) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
-	errs := make(chan error, len(m.Config.Webhooks))
+	errs := make(chan error, len(m.Config.Webhooks)+1)
+	if m.Config.UsesCodexResets() && m.Config.DailyReport.Enabled {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.dailyReports(ctx); err != nil && ctx.Err() == nil {
+				errs <- err
+				cancel()
+			}
+		}()
+	}
 	for _, d := range m.Config.Webhooks {
 		if !d.IsEnabled() {
 			continue
@@ -297,7 +322,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 			failures++
 			delay = max(delay, Backoff(m.Config.Poll.Interval, m.Config.Delivery.RetryMax, failures), outcome.RetryAfter)
 		}
-		delay += Jitter()
+		delay = jittered(delay)
 		m.Log.Info("next_poll", "wait", delay)
 		if !wait(ctx, delay) {
 			break

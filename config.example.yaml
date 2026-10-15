@@ -2,6 +2,21 @@
 # Never commit the real configuration, account DB, webhook URLs or signing secrets.
 database: data/monitor.db
 
+# x (default) or codex-resets; https://codex-resets.com/api/docs is also accepted.
+# Switching sources keeps separate baselines/dedup in the same monitor DB.
+source: x
+
+# Public, read-only API; no key, Python, X account or TypeSafe required.
+codex_resets:
+  timeout: 20s                 # whole status request / paginated history request
+
+# Only active with source: codex-resets. Sends to every enabled webhook.
+# Restart after the scheduled time catches up TODAY once, not previous days.
+daily_report:
+  enabled: false
+  time: "09:00"              # HH:MM, checked independently of poll.interval
+  timezone: Asia/Shanghai     # IANA timezone, not the server's local timezone
+
 target:
   user_id: "1953337039510003712"
   username: thsottiaux
@@ -20,7 +35,8 @@ scrape:
   max_pages: 5                 # includes refreshed head during continuation; minimum 2
   context_limit: 4             # max extra tweet_details calls per poll
 
-# All post/reply/quote cards (including run -debug) use the real TypeSafe API.
+# X post/reply/quote cards (including run -debug) use the real TypeSafe API.
+# Ignored by source: codex-resets; API classifications are not AI assessments.
 # Empty api_key reads TYPESAFE_API_KEY; missing key/service failures show unavailable, never a fake percentage.
 typesafe:
   api_key: ""                 # recommended: export TYPESAFE_API_KEY; or ${TYPESAFE_API_KEY}

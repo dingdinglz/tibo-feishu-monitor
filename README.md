@@ -1,10 +1,15 @@
 # Tibo Feishu Monitor
 
-Monitor Tibo's X posts and replies with Go + twscrape, and send one Feishu card per update.
+Monitor Tibo's X updates or Codex Resets, and send Feishu cards with optional daily reset reports.
 
-Go 常驻程序，调用固定版本的 Python `twscrape` 读取 [@thsottiaux](https://x.com/thsottiaux) 的主帖、引用帖和本人回复，转发到多个飞书群自定义机器人。不会转发他人的评论或原生转发；包含 Tibo 回复自己的消息。
+Go 常驻程序，支持两个可切换的数据源，向多个飞书群自定义机器人推送：
+
+- `source: x`（默认）：Python `twscrape` 读取 [@thsottiaux](https://x.com/thsottiaux) 的主帖、引用帖和本人回复，不转发他人的评论或原生转发。
+- `source: codex-resets`：直接调用 [Codex Resets 公共 API](https://codex-resets.com/api/docs)，通知新出现的已执行重置/备用重置额度记录；可每日定时发送当前状态卡片。**不需要 Python、X 账号或 TypeSafe Key**。
 
 ## 行为约定
+
+下列动态、上下文及 TypeSafe 规则针对默认的 X 数据源；API 数据源的差异见「切换到 Codex Resets 与每日卡片」。
 
 - 默认一次抓取结束后，等待 **3 分钟 + 独立随机的 1–30 秒**。基础间隔可在 YAML 中调整；不会重叠抓取。
 - 默认第一次成功取得时间线时建立静默基线，基线以前的帖子不通知；重启保留基线、续页进度和待发送任务。开启 `-debug` 时，另有下面说明的测试推送。
@@ -19,10 +24,10 @@ Go 常驻程序，调用固定版本的 Python `twscrape` 读取 [@thsottiaux](h
 ## 环境
 
 - Go **1.23+**（构建时需要；SQLite 使用纯 Go 驱动，运行不依赖 CGO）。
-- Python **3.10+**，固定 `twscrape==0.20.1`。
+- 仅 X 数据源需要 Python **3.10+**，固定 `twscrape==0.20.1`；API 数据源可跳过虚拟环境和 pip 安装。
 - macOS 或 Linux；Linux 常驻推荐 systemd。不提供 Web 管理界面。
 - 飞书客户端 7.20 或更新版本，以支持 Card 2.0。
-- 能访问 X 的网络/可选代理，以及现有的有效 twscrape 账号库。
+- X 数据源需要能访问 X 的网络/可选代理及有效 twscrape 账号库；API 数据源只需能直连 `https://codex-resets.com`。
 
 ```bash
 git clone https://github.com/dingdinglz/tibo-feishu-monitor.git
@@ -80,6 +85,44 @@ webhooks:
 
 允许直接在 YAML 填 URL/密钥，但更推荐环境变量。程序**不会自动加载 `.env` 文件**；systemd 用 `EnvironmentFile`，手动启动时自行导出环境变量。程序不在日志或业务库中保存 Webhook、签名密钥、TypeSafe API Key、Cookie 或代理凭据。
 
+### 切换到 Codex Resets 与每日卡片
+
+在现有 `config.yaml` 中加入以下配置，保留原来的 `database` 和 `webhooks`，然后重启：
+
+```yaml
+source: codex-resets          # 也接受 https://codex-resets.com/api/docs
+codex_resets:
+  timeout: 20s
+
+daily_report:
+  enabled: true
+  time: "09:00"             # 自行选择每日时间，24 小时制 HH:MM
+  timezone: Asia/Shanghai    # IANA 时区，例如 UTC、America/Los_Angeles
+```
+
+也可只用 `database`、上述配置和 `webhooks` 创建新配置。`scrape` / `typesafe` 可删除，也可原样保留：API 模式不解析它们的环境变量、不检查 Python/账号文件、不持有账号库锁、不调用 TypeSafe。此 API 固定追踪 thsottiaux，不支持自定义 `target`。`source` 不填仍为 `x`；改回 `x` 并重启即可恢复原采集方式。
+
+**新增重置通知：** 按 `poll.interval` 读取 `/api/v1/resets`，遵循游标分页、补抓窗口、限流冷却和现有发送重试。第一次成功建立独立静默基线，不把 API 历史刷到群里；切换来源不会复用 X 游标，也不会因 X 已见过相同帖子 ID 而漏掉后续 API 重置记录。再次切回沿用该来源的基线。已有发送任务继续处理，不清空数据库。API 不提供完整 X 时间线，普通动态、28 天挑战进展不在此模式的覆盖范围；预告与预测在日报里展示，不作为已执行重置通知。
+
+**每日状态卡片：** 参考 Codex Resets 页面，突出距最近重置的时长、发生时间，展示重置次数、平均间隔、最长等待；有待执行预告或有效预测时一起展示。所有卡片附 [数据来源：Codex Resets](https://codex-resets.com) 链接。
+
+- 默认关闭；只在 `source: codex-resets` 且 `enabled: true` 时创建日报。X 模式会提示该功能未生效。
+- 独立调度，每 30 秒检查一次，不受 X/API 轮询周期或采集阻塞影响；到点后请求最新快照，发送还可能受网络、队列和目标限流影响。
+- 以配置时区的**日期 + 目标 ID**持久去重，重启不重复创建当天任务。到点后才启动会补今天一张，不补停机期间的往日报表。新启用目标可收到当天一张。
+- API 失败不消耗当天名额，退避后重新读取；飞书失败走持久发送队列，失败目标不影响其他目标。次日新卡片会替换尚未发送的旧日报，避免恢复时刷出过期日报；普通重置事件不会因此丢弃。关闭功能/切回 X 后不创建新日报，已经入队的任务仍可能补发。
+- 卡片是**采集时的快照**，明确标注采集时间、时区和上游生成时间；发送重试不会假装数据刚刚更新。API 有 CDN 缓存，不承诺实时性。
+- `regular` 是上游标记的已执行重置，`banked` 是备用重置额度；没有 X 公告的 `observed` 记录显示为网站观测。不是对每个用户实际额度的权威核验。
+- `scheduled_reset` 即便计划时间已过仍显示待执行；`active_watch` 明确标为第三方 AI 预测，非官方承诺，过期预测不展示，缺失概率不冒充 0%。
+- 次数和平均间隔来自 `/api/v1/status`；最长等待来自 `/api/v1/resets` **完整历史中相邻记录的最大间隔**，不包含仍在进行的等待。完整分页失败会重试，不用局部数据；两接口缓存导致数量/最新记录及时间不一致时，最长等待显示暂无数据。少于两条记录时也不计算。
+
+只读验证当前数据（不创建业务库、不发送飞书、不调用 TypeSafe）：
+
+```bash
+./bin/tibo-monitor probe -config config.yaml
+```
+
+API 模式会读取状态和完整历史，输出含最长间隔的日报快照以及来源链接。`--pages` 仅适用于 X。验证无误后执行 `run` 启动；仓库不会自动修改运行配置或安装定时服务。
+
 ### 调度和抓取
 
 | 配置 | 默认 | 含义 |
@@ -96,7 +139,7 @@ webhooks:
 | `alerts.failure_threshold` | `3` | 连续失败阈值；永久发送配置错误立即提醒 |
 | `alerts.cooldown` | `30m` | 同一故障通知冷却时间 |
 
-飞书和 TypeSafe 默认直连，不继承系统 HTTP 代理；X 还可能使用 twscrape 账号库自带的代理。失败抓取也会退避，平台给出的冷却时间优先；基础轮询周期不是端到端延迟承诺。
+飞书、Codex Resets 和 TypeSafe 默认直连，不继承系统 HTTP 代理；X 还可能使用 twscrape 账号库自带的代理。失败抓取也会退避，平台给出的冷却时间优先；基础轮询周期不是端到端延迟承诺。
 
 ### 额度重置概率（TypeSafe AI）
 
@@ -139,17 +182,17 @@ TypeSafe Key 可在 [TypeSafe 控制台](https://console.typesafe.ai) 创建。�
 - 每轮成功抓取后，有新增则正常发送；没有新增则向所有启用的目标重发最新一条本人动态（含回复、引用），使用橙色标题并标注 `DEBUG 测试`。
 - 首次建立静默基线时也可以触发测试推送；最新一条早于补抓窗口时仍可用于测试，不扩大正常补抓范围。
 - 按发布时间和帖子 ID 判断最新，不直接取接口返回的第一项。抓取失败或没有可用帖子时不伪造测试消息。
-- 每个新测试批次在推送前真实调用 TypeSafe，卡片展示该次概率；调用失败显示“暂不可用”，不填模拟值。
+- X 模式每个新测试批次在推送前真实调用 TypeSafe，卡片展示该次概率；调用失败显示“暂不可用”，不填模拟值。API 模式则重发 `/status` 的最近重置记录，不调用 TypeSafe；没有记录不发送测试卡片。
 - 调试任务独立入队，不修改正常帖子的去重记录。失败照常重试；同一目标还有未完成调试任务时，不重复积压新的测试批次，正常动态优先发送。
 - 去掉 `-debug` 并重启后停止创建调试推送；已经入队但尚未成功的任务仍按发送队列补发。此参数仅用于 `run`，不会开启 twscrape 的敏感详细日志。
 
-### 只读验证 X，不发飞书
+### 只读验证数据源，不发飞书
 
 ```bash
-./bin/tibo-monitor probe -config config.yaml --pages 2
+./bin/tibo-monitor probe -config config.yaml  # X 模式可加 --pages 2
 ```
 
-输出公开帖子的 JSON、页数和覆盖状态；不创建/更新监控业务数据库，不发送飞书。**twscrape 自身会更新账号库的使用统计和限流锁**，这是正常读取的一部分。
+X 模式输出公开帖子的 JSON、页数和覆盖状态；API 模式输出日报数据快照（见上文）。两种模式均不创建/更新监控业务数据库，不发送飞书。**twscrape 自身会更新账号库的使用统计和限流锁**，这是正常读取的一部分。
 
 `probe` 不要求 Webhook 环境变量。页预算不足导致 `complete=false` 不等于没有新帖；`error` 非空或进程退出码非零才是明确的抓取失败。首次正式 `run` 仍会单独建立基线。
 
@@ -159,7 +202,7 @@ TypeSafe Key 可在 [TypeSafe 控制台](https://console.typesafe.ai) 创建。�
 ./bin/tibo-monitor status -config config.yaml
 ```
 
-包含最后请求成功时间、最后完整采集时间、基线、待发数量、目标是否暂停及最后发送时间；不包含凭据。
+包含最后运行的数据源、该来源的最后请求成功时间/完整采集时间/基线、帖子及 API 重置记录数、最近日报入队日期、待发数量、目标是否暂停及最后发送时间；不包含凭据。
 
 ### 手动发送一条测试消息
 
@@ -171,7 +214,7 @@ TypeSafe Key 可在 [TypeSafe 控制台](https://console.typesafe.ai) 创建。�
 
 只向指定目标发一张明确标记的测试卡片，验证与真实帖子相同的 Card 2.0 发送路径。命令中的 `team` 必须与自己的配置 `id` 一致；没有 `-confirm` 不发送。普通启动不自动发测试消息；`run -debug` 的测试推送规则见上文。
 
-签名算法采用官方的 `HMAC-SHA256(key=timestamp+"\n"+secret, message="")`，每次尝试重新签名。关键词校验需让 `prefix` 包含所配置关键词；IP 白名单由运行机器出口地址决定。系统时间应同步。卡片中的动态正文使用 `plain_text`，不执行原文中的 Markdown 或交互标签；`<at ...>` 另外做防提及处理。所有按钮仅打开 X 原帖/上下文链接，无服务端回调，不需要飞书应用权限。运维告警和恢复提醒仍采用文本消息。
+签名算法采用官方的 `HMAC-SHA256(key=timestamp+"\n"+secret, message="")`，每次尝试重新签名。关键词校验需让 `prefix` 包含所配置关键词；IP 白名单由运行机器出口地址决定。系统时间应同步。卡片中的动态正文使用 `plain_text`，不执行原文中的 Markdown 或交互标签；`<at ...>` 另外做防提及处理。所有按钮仅打开 X 原帖/上下文或 Codex Resets 来源链接，无服务端回调，不需要飞书应用权限。运维告警和恢复提醒仍采用文本消息。
 
 卡片整个 HTTP 请求体（包括签名、时间戳和关键词前缀）限制在 19,000 字节以内，为 Webhook 的 20KB 限制留出余量。新版启动时会将旧版未完成的**普通帖子**分片按“帖子 + 目标”合并为一张待发送卡片，保留重试时间和尝试次数；已发送记录不会重发。旧版调试消息仍兼容，并以测试卡片发送。
 
@@ -220,7 +263,7 @@ make test-python PYTHON=/absolute/path/to/python
 go vet ./...
 ```
 
-测试不向 X/飞书/TypeSafe 发送真实请求；TypeSafe HTTP 协议、概率渲染、debug 每批次重新评估和历史上下文用离线模拟测试覆盖。实际联网只读验证使用 `probe`；真实飞书推送必须单独执行 `test-send` 或启用 `run`。
+测试不向 X/Codex Resets/飞书/TypeSafe 发送真实请求；新增 API 协议与分页、来源切换、时区/DST 调度、日报去重/重启/失败重试和卡片用离线模拟测试覆盖。TypeSafe HTTP 协议、概率渲染、debug 每批次重新评估和历史上下文用离线模拟测试覆盖。实际联网只读验证使用 `probe`；真实飞书推送必须单独执行 `test-send` 或启用 `run`。
 
 ## 完整性与运维边界
 
@@ -232,7 +275,7 @@ go vet ./...
 - 每个目标按已入队帖子的时间逐张发送；多条新增不合并，不并发轰炸同一个机器人。迟到才发现的旧帖无法插到已经发出的消息前；告警优先于普通积压，调试卡片排在正常动态之后。
 - 所有机器人都失效时，飞书无法承担自身故障通知，只能检查服务日志和 `status`。没有独立邮件/短信通道。
 - 业务库和账号库分开。业务库保留去重记录、原文及发送状态，不自动清理；定期备份并监控磁盘。不要直接删除业务库来排错，删除意味着下一次重新建立基线。
-- 只运行一个实例；程序对账号库和业务库加进程锁。不要同时用其他程序高频读取同一个账号库，不要手动清锁规避冷却。
+- 只运行一个实例；程序对业务库加进程锁，X 模式另对账号库加锁。不要同时用其他程序高频读取同一个账号库，不要手动清锁规避冷却。
 
 设计约定见 [`docs/design.md`](docs/design.md)，凭据管理与发布检查见 [`SECURITY.md`](SECURITY.md)。
 

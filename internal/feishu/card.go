@@ -23,6 +23,8 @@ type cardText struct {
 	Content   string `json:"content"`
 	TextSize  string `json:"text_size,omitempty"`
 	TextColor string `json:"text_color,omitempty"`
+	TextAlign string `json:"text_align,omitempty"`
+	Lines     int    `json:"lines,omitempty"`
 }
 
 type cardView struct {
@@ -31,9 +33,10 @@ type cardView struct {
 		WidthMode string `json:"width_mode"`
 	} `json:"config"`
 	Header struct {
-		Template string    `json:"template"`
-		Title    cardText  `json:"title"`
-		Subtitle *cardText `json:"subtitle,omitempty"`
+		Template string            `json:"template"`
+		Title    cardText          `json:"title"`
+		Subtitle *cardText         `json:"subtitle,omitempty"`
+		Icon     map[string]string `json:"icon,omitempty"`
 	} `json:"header"`
 	Body struct {
 		Padding         string `json:"padding"`
@@ -110,6 +113,9 @@ func resetGroup(a *model.ResetAssessment, color string) map[string]any {
 }
 
 func renderCard(record cardRecord, prefix, body string, truncated bool) cardView {
+	if record.CodexReset != nil {
+		return renderCodexReset(*record.CodexReset, record.Debug, prefix, body, truncated)
+	}
 	var card cardView
 	card.Schema = "2.0"
 	card.Config.WidthMode = "default"
@@ -185,19 +191,33 @@ func (c *Client) cardBody(prefix, secret string, record cardRecord) ([]byte, err
 		payload.Timestamp = strconv.FormatInt(c.now().Unix(), 10)
 		payload.Sign = sign(secret, payload.Timestamp)
 	}
-	text := record.Notice
-	if record.Post != nil {
-		text = record.Post.Text
+	var render func(int) cardView
+	var limit int
+	if report := record.CodexReport; report != nil {
+		// Daily optional texts are snippets, not unbounded copies of the API.
+		// Reduce them together if escaping/prefix/signing exhausts the budget.
+		limit = codexSnippetRunes
+		render = func(n int) cardView { return renderCodexReport(*report, prefix, n) }
+	} else {
+		text := record.Notice
+		if record.Post != nil {
+			text = record.Post.Text
+		} else if record.CodexReset != nil {
+			text = record.CodexReset.Text
+		}
+		runes := []rune(text)
+		limit = len(runes)
+		render = func(n int) cardView { return renderCard(record, prefix, string(runes[:n]), n < limit) }
 	}
-	encode := func(body string, truncated bool) ([]byte, error) {
-		payload.Card = renderCard(record, prefix, body, truncated)
+	encode := func(n int) ([]byte, error) {
+		payload.Card = render(n)
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			return nil, &SendError{Code: "payload_encoding", Permanent: true}
 		}
 		return raw, nil
 	}
-	full, err := encode(text, false)
+	full, err := encode(limit)
 	if err != nil {
 		return nil, err
 	}
@@ -206,18 +226,17 @@ func (c *Client) cardBody(prefix, secret string, record cardRecord) ([]byte, err
 	}
 	// Binary search on rune boundaries using the ACTUAL final JSON bytes. This
 	// includes HTML/control escaping, mention guards and the truncation notice.
-	runes := []rune(text)
-	best, err := encode("", true)
+	best, err := encode(0)
 	if err != nil {
 		return nil, err
 	}
 	if len(best) > maxCardRequestBytes {
 		return nil, &SendError{Code: "payload_too_large", Permanent: true}
 	}
-	low, high := 0, len(runes)
+	low, high := 0, limit
 	for low < high {
 		mid := (low + high + 1) / 2
-		candidate, err := encode(string(runes[:mid]), true)
+		candidate, err := encode(mid)
 		if err != nil {
 			return nil, err
 		}

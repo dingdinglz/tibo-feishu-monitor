@@ -39,11 +39,14 @@ type Job struct {
 }
 
 type Status struct {
-	Scan         ScanState           `json:"scan"`
-	Posts        int                 `json:"posts"`
-	Pending      int                 `json:"pending"`
-	Sent         int                 `json:"sent"`
-	Destinations []DestinationStatus `json:"destinations"`
+	Source          string              `json:"source"`
+	DailyReportDate string              `json:"daily_report_date,omitempty"`
+	Scan            ScanState           `json:"scan"`
+	Posts           int                 `json:"posts"`
+	Resets          int                 `json:"resets"`
+	Pending         int                 `json:"pending"`
+	Sent            int                 `json:"sent"`
+	Destinations    []DestinationStatus `json:"destinations"`
 }
 
 type DestinationStatus struct {
@@ -64,6 +67,7 @@ CREATE TABLE IF NOT EXISTS posts (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, discovered_at INTEGER NOT NULL, data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at, length(id), id);
+CREATE TABLE IF NOT EXISTS codex_resets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reset_assessments (key TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contexts (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -543,7 +547,14 @@ func (s *Store) Recover(ctx context.Context, key, description string, now time.T
 func (s *Store) Status(ctx context.Context) (Status, error) {
 	var st Status
 	var err error
-	st.Scan, err = s.State(ctx)
+	st.Source = config.SourceX
+	for key, ptr := range map[string]*string{"source": &st.Source, "daily_report_date": &st.DailyReportDate} {
+		err = s.db.QueryRowContext(ctx, "SELECT value FROM meta WHERE key=?", key).Scan(ptr)
+		if err != nil && err != sql.ErrNoRows {
+			return st, err
+		}
+	}
+	st.Scan, err = s.SourceState(ctx, st.Source)
 	if err != nil {
 		return st, err
 	}
@@ -556,6 +567,16 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 		{"SELECT COUNT(*) FROM outbox WHERE status='sent'", &st.Sent},
 	} {
 		if err = s.db.QueryRowContext(ctx, q.query).Scan(q.ptr); err != nil {
+			return st, err
+		}
+	}
+	// status also supports databases from before the API source was added.
+	var hasResets bool
+	if err = s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='codex_resets')").Scan(&hasResets); err != nil {
+		return st, err
+	}
+	if hasResets {
+		if err = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM codex_resets").Scan(&st.Resets); err != nil {
 			return st, err
 		}
 	}

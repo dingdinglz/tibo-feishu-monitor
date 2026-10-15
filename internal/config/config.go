@@ -10,13 +10,24 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	SourceX           = "x"
+	SourceCodexResets = "codex-resets"
+)
+
 type Config struct {
-	Database string `yaml:"database"`
-	Target   struct {
+	Source      string `yaml:"source"`
+	CodexResets struct {
+		Timeout time.Duration `yaml:"timeout"`
+	} `yaml:"codex_resets"`
+	DailyReport DailyReport `yaml:"daily_report"`
+	Database    string      `yaml:"database"`
+	Target      struct {
 		UserID   string `yaml:"user_id"`
 		Username string `yaml:"username"`
 	} `yaml:"target"`
@@ -48,6 +59,14 @@ type Config struct {
 	Webhooks []Destination `yaml:"webhooks"`
 }
 
+type DailyReport struct {
+	Enabled  bool   `yaml:"enabled"`
+	Time     string `yaml:"time"` // HH:MM in Timezone
+	Timezone string `yaml:"timezone"`
+}
+
+func (c Config) UsesCodexResets() bool { return c.Source == SourceCodexResets }
+
 type TypeSafe struct {
 	APIKey        string        `yaml:"api_key"`
 	Model         string        `yaml:"model"`
@@ -68,6 +87,9 @@ func (d Destination) IsEnabled() bool { return d.Enabled == nil || *d.Enabled }
 
 func Defaults() Config {
 	var c Config
+	c.Source = SourceX
+	c.CodexResets.Timeout = 20 * time.Second
+	c.DailyReport = DailyReport{Time: "09:00", Timezone: "Asia/Shanghai"}
 	c.Database = "data/monitor.db"
 	c.Target.UserID = "1953337039510003712"
 	c.Target.Username = "thsottiaux"
@@ -157,6 +179,23 @@ func Load(path string, probe bool) (Config, error) {
 		return c, errors.New("cannot resolve config path")
 	}
 	base := filepath.Dir(abs)
+	switch strings.TrimSuffix(strings.TrimSpace(c.Source), "/") {
+	case "", SourceX:
+		c.Source = SourceX
+	case SourceCodexResets, "https://codex-resets.com", "https://codex-resets.com/api/docs":
+		c.Source = SourceCodexResets
+	default:
+		return c, errors.New("source must be x or codex-resets (https://codex-resets.com/api/docs)")
+	}
+	if c.CodexResets.Timeout < time.Second || c.CodexResets.Timeout > 5*time.Minute {
+		return c, errors.New("codex_resets.timeout must be 1s..5m")
+	}
+	if _, err := time.Parse("15:04", c.DailyReport.Time); err != nil || len(c.DailyReport.Time) != 5 {
+		return c, errors.New("daily_report.time must be HH:MM (00:00..23:59)")
+	}
+	if _, err := time.LoadLocation(c.DailyReport.Timezone); err != nil || c.DailyReport.Timezone == "" {
+		return c, errors.New("daily_report.timezone must be a valid IANA timezone")
+	}
 	for _, p := range []struct {
 		name       string
 		ptr        *string
@@ -165,23 +204,31 @@ func Load(path string, probe bool) (Config, error) {
 		{"database", &c.Database, false}, {"scrape.python", &c.Scrape.Python, true},
 		{"scrape.script", &c.Scrape.Script, false}, {"scrape.accounts_db", &c.Scrape.AccountsDB, false},
 	} {
+		if c.UsesCodexResets() && strings.HasPrefix(p.name, "scrape.") {
+			continue // inactive X settings must not require paths or environment secrets
+		}
 		*p.ptr, err = resolve(base, *p.ptr, p.executable)
 		if err != nil {
 			return c, fmt.Errorf("%s: %w", p.name, err)
 		}
 	}
-	c.Scrape.Proxy, err = expand(c.Scrape.Proxy)
-	if err != nil {
-		return c, fmt.Errorf("scrape.proxy: %w", err)
-	}
-	if c.Scrape.Proxy != "" {
-		u, e := url.Parse(c.Scrape.Proxy)
-		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
-			return c, errors.New("scrape.proxy must be an HTTP(S) or SOCKS5 URL")
+	if !c.UsesCodexResets() {
+		c.Scrape.Proxy, err = expand(c.Scrape.Proxy)
+		if err != nil {
+			return c, fmt.Errorf("scrape.proxy: %w", err)
+		}
+		if c.Scrape.Proxy != "" {
+			u, e := url.Parse(c.Scrape.Proxy)
+			if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
+				return c, errors.New("scrape.proxy must be an HTTP(S) or SOCKS5 URL")
+			}
 		}
 	}
 	if !numberPattern.MatchString(c.Target.UserID) || !usernamePattern.MatchString(c.Target.Username) {
 		return c, errors.New("invalid target user_id or username")
+	}
+	if c.UsesCodexResets() && (c.Target.Username != "thsottiaux" || c.Target.UserID != Defaults().Target.UserID) {
+		return c, errors.New("codex-resets tracks only thsottiaux; keep the default target")
 	}
 	if c.Database == c.Scrape.AccountsDB {
 		return c, errors.New("monitor database must differ from twscrape account database")
@@ -192,11 +239,13 @@ func Load(path string, probe bool) (Config, error) {
 	if c.Poll.CatchUpWindow < c.Poll.Interval || c.Poll.CatchUpWindow > 30*24*time.Hour {
 		return c, errors.New("poll.catch_up_window must cover interval and be at most 720h")
 	}
-	if c.Scrape.Timeout < time.Second || c.Scrape.Timeout > 10*time.Minute || c.Scrape.WaitTimeout < 0 || c.Scrape.WaitTimeout >= c.Scrape.Timeout {
-		return c, errors.New("invalid scrape timeout or wait_timeout")
-	}
-	if c.Scrape.MaxPages < 2 || c.Scrape.MaxPages > 100 || c.Scrape.ContextLimit < 0 || c.Scrape.ContextLimit > 20 {
-		return c, errors.New("scrape.max_pages must be 2..100 and context_limit 0..20")
+	if !c.UsesCodexResets() {
+		if c.Scrape.Timeout < time.Second || c.Scrape.Timeout > 10*time.Minute || c.Scrape.WaitTimeout < 0 || c.Scrape.WaitTimeout >= c.Scrape.Timeout {
+			return c, errors.New("invalid scrape timeout or wait_timeout")
+		}
+		if c.Scrape.MaxPages < 2 || c.Scrape.MaxPages > 100 || c.Scrape.ContextLimit < 0 || c.Scrape.ContextLimit > 20 {
+			return c, errors.New("scrape.max_pages must be 2..100 and context_limit 0..20")
+		}
 	}
 	if c.Delivery.Timeout < time.Second || c.Delivery.Timeout > time.Minute || c.Delivery.RetryInitial < time.Second || c.Delivery.RetryMax < c.Delivery.RetryInitial || c.Delivery.RetryMax > 24*time.Hour || c.Delivery.SendInterval < time.Second || c.Delivery.SendInterval > time.Minute {
 		return c, errors.New("invalid delivery timing (send_interval must be 1s..1m)")
@@ -204,15 +253,17 @@ func Load(path string, probe bool) (Config, error) {
 	if c.Alerts.FailureThreshold < 1 || c.Alerts.Cooldown < time.Minute {
 		return c, errors.New("invalid alerts threshold or cooldown")
 	}
-	if c.TypeSafe.Timeout < time.Second || c.TypeSafe.Timeout > time.Minute ||
-		c.TypeSafe.RecentPosts < 1 || c.TypeSafe.RecentPosts > 10 ||
-		c.TypeSafe.HistoryWindow < time.Hour || c.TypeSafe.HistoryWindow > 30*24*time.Hour {
-		return c, errors.New("invalid typesafe timing/history (timeout 1s..1m, recent_posts 1..10, history_window 1h..720h)")
+	if !c.UsesCodexResets() {
+		if c.TypeSafe.Timeout < time.Second || c.TypeSafe.Timeout > time.Minute ||
+			c.TypeSafe.RecentPosts < 1 || c.TypeSafe.RecentPosts > 10 ||
+			c.TypeSafe.HistoryWindow < time.Hour || c.TypeSafe.HistoryWindow > 30*24*time.Hour {
+			return c, errors.New("invalid typesafe timing/history (timeout 1s..1m, recent_posts 1..10, history_window 1h..720h)")
+		}
+		if !modelPattern.MatchString(c.TypeSafe.Model) {
+			return c, errors.New("invalid typesafe.model")
+		}
 	}
-	if !modelPattern.MatchString(c.TypeSafe.Model) {
-		return c, errors.New("invalid typesafe.model")
-	}
-	if probe {
+	if probe || c.UsesCodexResets() {
 		c.TypeSafe.APIKey = "" // probe/status never need or expose inference credentials
 	} else {
 		c.TypeSafe.APIKey, err = expand(c.TypeSafe.APIKey)

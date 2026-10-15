@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"tibo-monitor/internal/codexresets"
 	"tibo-monitor/internal/config"
 	"tibo-monitor/internal/feishu"
 	"tibo-monitor/internal/lock"
@@ -36,7 +37,7 @@ func main() {
 
 func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: tibo-monitor <run|probe|status|test-send> -config config.yaml\n  run [-debug]  Monitor continuously; -debug resends the latest post when no new posts are found\n  probe     One read-only X scan; no monitor DB changes or Feishu messages\n  status    Show persisted progress and pending deliveries\n  test-send -destination ID -confirm    Send ONE explicit test message")
+		fmt.Println("Usage: tibo-monitor <run|probe|status|test-send> -config config.yaml\n  run [-debug]  Monitor continuously; -debug resends the latest post when no new posts are found\n  probe     Read the selected source (X scan or Codex report); no DB changes or Feishu messages\n  status    Show persisted progress and pending deliveries\n  test-send -destination ID -confirm    Send ONE explicit test message")
 		return nil
 	}
 	command := args[0]
@@ -99,13 +100,30 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	if err := preflight(&c, log); err != nil {
 		return err
 	}
-	accountLock, err := lock.Acquire(c.Scrape.AccountsDB + ".tibo-monitor.lock")
-	if err != nil {
-		return err
+	if !c.UsesCodexResets() {
+		accountLock, err := lock.Acquire(c.Scrape.AccountsDB + ".tibo-monitor.lock")
+		if err != nil {
+			return err
+		}
+		defer accountLock.Close()
 	}
-	defer accountLock.Close()
 	fetcher := scrape.Python{Executable: c.Scrape.Python, Script: c.Scrape.Script}
+	resetProvider := codexresets.New(c.CodexResets.Timeout)
 	if command == "probe" {
+		if c.UsesCodexResets() {
+			if *pages != 0 {
+				return errors.New("pages is only supported by the X source")
+			}
+			report, err := monitor.BuildCodexReport(ctx, resetProvider, time.Now().UTC(), c.DailyReport.Timezone)
+			if err != nil {
+				return err
+			}
+			return printJSON(struct {
+				Source      string            `json:"source"`
+				Attribution string            `json:"attribution"`
+				Report      model.CodexReport `json:"report"`
+			}{c.Source, model.CodexResetsURL, report})
+		}
 		if *pages != 0 {
 			if *pages < 2 || *pages > 100 {
 				return errors.New("pages must be 2..100")
@@ -137,6 +155,9 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	if err := s.SyncDestinations(ctx, c.Target.UserID, c.Webhooks); err != nil {
 		return err
 	}
+	if err := s.SetSource(ctx, c.Source); err != nil {
+		return err
+	}
 	upgraded, err := s.UpgradePendingPosts(ctx, feishu.Format)
 	if err != nil {
 		return err
@@ -144,21 +165,30 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	if upgraded > 0 {
 		log.Info("pending_posts_upgraded_to_cards", "deliveries", upgraded)
 	}
-	if c.TypeSafe.APIKey == "" {
-		log.Warn("typesafe_not_configured", "hint", "set TYPESAFE_API_KEY; reset probability will be shown as unavailable until configured")
+	m := monitor.Monitor{Config: c, Store: s, Fetcher: fetcher, ResetProvider: resetProvider, Sender: feishu.New(c.Delivery.Timeout), Log: log, Debug: *debug}
+	if !c.UsesCodexResets() {
+		m.Assessor = typesafe.New(c.TypeSafe)
+		if c.TypeSafe.APIKey == "" {
+			log.Warn("typesafe_not_configured", "hint", "set TYPESAFE_API_KEY; reset probability will be shown as unavailable until configured")
+		}
+		if c.DailyReport.Enabled {
+			log.Warn("daily_report_inactive", "reason", "daily reports require source: codex-resets")
+		}
 	}
-	m := monitor.Monitor{Config: c, Store: s, Fetcher: fetcher, Sender: feishu.New(c.Delivery.Timeout), Log: log, Debug: *debug, Assessor: typesafe.New(c.TypeSafe)}
-	log.Info("monitor_started", "target", c.Target.Username, "interval", c.Poll.Interval, "jitter", "1s..30s", "debug", *debug)
+	log.Info("monitor_started", "source", c.Source, "target", c.Target.Username, "interval", c.Poll.Interval, "jitter", "1s..30s", "debug", *debug)
 	return m.Run(ctx)
 }
 
 func preflight(c *config.Config, log *slog.Logger) error {
 	// Resolve symlinks before deriving lock paths; aliases must share ownership.
-	if real, err := filepath.EvalSymlinks(c.Scrape.AccountsDB); err == nil {
-		c.Scrape.AccountsDB = real
-	}
 	if real, err := filepath.EvalSymlinks(c.Database); err == nil {
 		c.Database = real
+	}
+	if c.UsesCodexResets() {
+		return nil
+	}
+	if real, err := filepath.EvalSymlinks(c.Scrape.AccountsDB); err == nil {
+		c.Scrape.AccountsDB = real
 	}
 	acc, err := os.Stat(c.Scrape.AccountsDB)
 	if err != nil || !acc.Mode().IsRegular() {
