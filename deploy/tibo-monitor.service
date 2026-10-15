@@ -1,0 +1,27 @@
+[Unit]
+Description=Tibo X monitor to Feishu custom webhooks
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tibo
+Group=tibo
+WorkingDirectory=/opt/tibo-monitor
+EnvironmentFile=/etc/tibo-monitor/env
+ExecStart=/opt/tibo-monitor/bin/tibo-monitor run -config /etc/tibo-monitor/config.yaml
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=110
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+# Both SQLite files need writable directories for WAL/locks, not merely writable DB files.
+ReadWritePaths=/var/lib/tibo-monitor
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+# Copy to config.yaml; paths are relative to this file, not the working directory.
+# Never commit the real configuration, account DB, webhook URLs or signing secrets.
+database: data/monitor.db
+
+target:
+  user_id: "1953337039510003712"
+  username: thsottiaux
+
+poll:
+  interval: 3m                 # after each fetch finishes, add random 1..30 seconds
+  catch_up_window: 24h         # old unsent jobs already in SQLite never expire
+
+scrape:
+  python: .venv/bin/python     # must have twscrape==0.20.1, Python >= 3.10
+  script: scripts/fetch.py
+  accounts_db: ${TWSCRAPE_ACCOUNTS_DB}
+  proxy: ""                   # optional: http://127.0.0.1:7890 or ${X_PROXY}
+  timeout: 75s
+  wait_timeout: 15s
+  max_pages: 5                 # includes refreshed head during continuation; minimum 2
+  context_limit: 4             # max extra tweet_details calls per poll
+
+delivery:
+  timeout: 10s
+  send_interval: 1s            # per destination, includes alerts
+  retry_initial: 30s
+  retry_max: 30m
+
+alerts:
+  failure_threshold: 3
+  cooldown: 30m
+
+webhooks:
+  - id: team                  # stable identity, independent of URL and list order
+    enabled: true
+    url: ${FEISHU_TEAM_WEBHOOK}
+    secret: ""                # optional: ${FEISHU_TEAM_SECRET} if signature check enabled
+    prefix: "Tibo 更新"        # include the robot's configured keyword, if any
+  # - id: another-group
+  #   enabled: true
+  #   url: ${FEISHU_OTHER_WEBHOOK}
+  #   secret: ${FEISHU_OTHER_SECRET}
+  #   prefix: "Tibo 更新"

@@ -1,0 +1,43 @@
+# Runtime credentials and state
+config.yaml
+config.yml
+config.*.yaml
+config.*.yml
+!config.example.yaml
+!config.example.yml
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+*.lock
+*.log
+data/
+secrets/
+private/
+*.pem
+*.key
+*.p12
+*.pfx
+cookies*.txt
+cookies*.json
+
+# Local research and verification notes (not part of the public distribution)
+/twscrape-tibo-feishu方案与资料.md
+/docs/validation.md
+
+# Editor/agent local state
+.vscode/
+.idea/
+.pi/
+.agents/
+
+# Build and Python environment
+bin/
+.venv/
+__pycache__/
+*.py[cod]
+.coverage
+coverage.out
+.DS_Store
