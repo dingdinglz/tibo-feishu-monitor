@@ -27,7 +27,7 @@ func (m *Monitor) resetFailure(ctx context.Context, component string, fetchErr e
 		outcome.RetryAfter = apiErr.RetryAfter
 	}
 	// Upstream bodies and arbitrary error strings never reach logs or cards.
-	err := m.fault(ctx, component, "Codex Resets API 暂不可用，本轮未生成通知，将稍后重试。", "", m.Config.Alerts.FailureThreshold)
+	err := m.fault(ctx, component, "Codex Resets API 部分数据暂不可用，将稍后重试；已入队的通知继续发送。", "", m.Config.Alerts.FailureThreshold)
 	return outcome, err
 }
 
@@ -46,31 +46,48 @@ func (m *Monitor) pollResets(ctx context.Context, now time.Time) (PollResult, er
 			return outcome, err
 		}
 	}
-	resets, err := m.ResetProvider.Resets(ctx, cutoff)
-	if err != nil {
-		return m.resetFailure(ctx, "codex_resets", err)
-	}
-	if ctx.Err() != nil {
-		return outcome, ctx.Err()
-	}
-	if !state.Initialized {
-		state.Initialized = true
-		state.Baseline = now
-		m.Log.Info("baseline_established", "source", config.SourceCodexResets, "since", now)
-	}
-	state.LastComplete, state.LastRequestSuccess = now, now
-	outcome.Added, err = m.Store.ApplyCodexScan(ctx, resets, state, now, cutoff, feishu.FormatCodexReset)
-	if err != nil {
-		return outcome, err
-	}
-	if err := m.Store.Recover(ctx, "codex_resets", "Codex Resets API 采集已恢复。", now); err != nil {
-		return outcome, err
-	}
-	if m.Debug && outcome.Added == 0 {
-		status, err := m.ResetProvider.Status(ctx)
+	resets, historyErr := m.ResetProvider.Resets(ctx, cutoff)
+	if historyErr != nil {
+		outcome, err = m.resetFailure(ctx, "codex_resets", historyErr)
 		if err != nil {
-			return m.resetFailure(ctx, "codex_debug", err)
+			return outcome, err
 		}
+	} else {
+		if ctx.Err() != nil {
+			return outcome, ctx.Err()
+		}
+		if !state.Initialized {
+			state.Initialized = true
+			state.Baseline = now
+			m.Log.Info("baseline_established", "source", config.SourceCodexResets, "since", now)
+		}
+		state.LastComplete, state.LastRequestSuccess = now, now
+		outcome.Added, err = m.Store.ApplyCodexScan(ctx, resets, state, now, cutoff, feishu.FormatCodexReset)
+		if err != nil {
+			return outcome, err
+		}
+		if err := m.Store.Recover(ctx, "codex_resets", "Codex Resets API 采集已恢复。", now); err != nil {
+			return outcome, err
+		}
+	}
+	newResets := outcome.Added
+	// Status is polled even without daily reports/debug. A failed history fetch
+	// must not hide a live watch, and a failed status fetch must not drop resets.
+	status, statusErr := m.ResetProvider.Status(ctx)
+	if statusErr != nil {
+		failure, err := m.resetFailure(ctx, "codex_status", statusErr)
+		outcome.RetryAfter = max(outcome.RetryAfter, failure.RetryAfter)
+		return outcome, err
+	}
+	newWatches, err := m.Store.QueueCodexWatch(ctx, status.ActiveWatch, now, feishu.FormatCodexWatch)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.Added += newWatches
+	if err := m.Store.Recover(ctx, "codex_status", "Codex Resets 状态及预测读取已恢复。", now); err != nil {
+		return outcome, err
+	}
+	if m.Debug && historyErr == nil && outcome.Added == 0 {
 		if status.LatestReset != nil {
 			n, err := m.Store.QueueCodexDebug(ctx, *status.LatestReset, now, feishu.FormatCodexReset)
 			if err != nil {
@@ -82,8 +99,8 @@ func (m *Monitor) pollResets(ctx context.Context, now time.Time) (PollResult, er
 			return outcome, err
 		}
 	}
-	outcome.Success = true
-	m.Log.Info("poll_finished", "source", config.SourceCodexResets, "new_resets", outcome.Added)
+	outcome.Success = historyErr == nil
+	m.Log.Info("poll_finished", "source", config.SourceCodexResets, "new_resets", newResets, "new_watches", newWatches)
 	return outcome, nil
 }
 

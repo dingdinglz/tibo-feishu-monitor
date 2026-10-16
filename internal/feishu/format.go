@@ -30,6 +30,7 @@ type cardRecord struct {
 	Notice      string                 `json:"notice,omitempty"`
 	Reset       *model.ResetAssessment `json:"reset_assessment,omitempty"`
 	CodexReset  *model.CodexReset      `json:"codex_reset,omitempty"`
+	CodexWatch  *model.CodexWatch      `json:"codex_watch,omitempty"`
 	CodexReport *model.CodexReport     `json:"codex_report,omitempty"`
 }
 
@@ -134,6 +135,12 @@ func validCardRecord(record cardRecord) bool {
 	}
 	if record.CodexReset != nil {
 		if !record.CodexReset.Valid() {
+			return false
+		}
+		kinds++
+	}
+	if record.CodexWatch != nil {
+		if !record.CodexWatch.Valid() || record.Debug {
 			return false
 		}
 		kinds++

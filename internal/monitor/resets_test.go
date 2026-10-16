@@ -15,17 +15,24 @@ type fakeResets struct {
 	status                    model.CodexStatus
 	resets                    []model.CodexReset
 	err                       error
+	statusErr, historyErr     error
 	statusCalls, historyCalls int
 	from                      []time.Time
 }
 
 func (f *fakeResets) Status(context.Context) (model.CodexStatus, error) {
 	f.statusCalls++
+	if f.statusErr != nil {
+		return f.status, f.statusErr
+	}
 	return f.status, f.err
 }
 func (f *fakeResets) Resets(_ context.Context, from time.Time) ([]model.CodexReset, error) {
 	f.historyCalls++
 	f.from = append(f.from, from)
+	if f.historyErr != nil {
+		return f.resets, f.historyErr
+	}
 	return f.resets, f.err
 }
 func resetFixture(id string, at time.Time) model.CodexReset {

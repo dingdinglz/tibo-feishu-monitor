@@ -7,6 +7,7 @@ database: data/monitor.db
 source: x
 
 # Public, read-only API; no key, Python, X account or TypeSafe required.
+# Polls confirmed resets and active-watch predictions, even with daily reports disabled.
 codex_resets:
   timeout: 20s                 # whole status request / paginated history request
 

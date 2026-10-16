@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -86,6 +87,57 @@ SELECT ? || ':' || id,id,'reset',?,? FROM destinations WHERE enabled=1`, "reset:
 		return 0, err
 	}
 	return added, tx.Commit()
+}
+
+type WatchFormatter func(model.CodexWatch) (string, error)
+
+// Watches have no upstream ID. The source and observation instant identify an
+// event; edits to its probability/text/expiry do not replay the same signal.
+// Unlike reset history, a currently active watch is useful even on first run.
+func (s *Store) QueueCodexWatch(ctx context.Context, watch *model.CodexWatch, now time.Time, format WatchFormatter) (int, error) {
+	if watch == nil {
+		return 0, nil
+	}
+	if !watch.Valid() {
+		return 0, errors.New("invalid reset watch")
+	}
+	if !watch.ExpiresAt.After(now) {
+		return 0, nil
+	}
+	identity, err := json.Marshal(struct {
+		Source     model.CodexSource `json:"source"`
+		ObservedAt time.Time         `json:"observed_at"`
+	}{watch.Source, watch.ObservedAt.UTC()})
+	if err != nil {
+		return 0, err
+	}
+	id := fmt.Sprintf("%x", sha256.Sum256(identity))
+	raw, err := json.Marshal(watch)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO codex_watches(id,data) VALUES(?,?)", id, string(raw))
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return 0, err
+	}
+	body, err := format(*watch)
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO outbox(dedup_key,destination,kind,body,created_at)
+SELECT ? || ':' || id,id,'watch',?,? FROM destinations WHERE enabled=1`, "watch:"+id, body, watch.ObservedAt.UnixMilli()); err != nil {
+		return 0, err
+	}
+	return 1, tx.Commit()
 }
 
 func (s *Store) QueueCodexDebug(ctx context.Context, reset model.CodexReset, now time.Time, format ResetFormatter) (int, error) {

@@ -5,7 +5,7 @@ Monitor Tibo's X updates or Codex Resets, and send Feishu cards with optional da
 Go 常驻程序，支持两个可切换的数据源，向多个飞书群自定义机器人推送：
 
 - `source: x`（默认）：Python `twscrape` 读取 [@thsottiaux](https://x.com/thsottiaux) 的主帖、引用帖和本人回复，不转发他人的评论或原生转发。
-- `source: codex-resets`：直接调用 [Codex Resets 公共 API](https://codex-resets.com/api/docs)，通知新出现的已执行重置/备用重置额度记录；可每日定时发送当前状态卡片。**不需要 Python、X 账号或 TypeSafe Key**。
+- `source: codex-resets`：直接调用 [Codex Resets 公共 API](https://codex-resets.com/api/docs)，通知新出现的已执行重置/备用重置额度记录，以及有效的“可能重置”预测；可每日定时发送当前状态卡片。**不需要 Python、X 账号或 TypeSafe Key**。
 
 ## 行为约定
 
@@ -102,7 +102,13 @@ daily_report:
 
 也可只用 `database`、上述配置和 `webhooks` 创建新配置。`scrape` / `typesafe` 可删除，也可原样保留：API 模式不解析它们的环境变量、不检查 Python/账号文件、不持有账号库锁、不调用 TypeSafe。此 API 固定追踪 thsottiaux，不支持自定义 `target`。`source` 不填仍为 `x`；改回 `x` 并重启即可恢复原采集方式。
 
-**新增重置通知：** 按 `poll.interval` 读取 `/api/v1/resets`，遵循游标分页、补抓窗口、限流冷却和现有发送重试。第一次成功建立独立静默基线，不把 API 历史刷到群里；切换来源不会复用 X 游标，也不会因 X 已见过相同帖子 ID 而漏掉后续 API 重置记录。再次切回沿用该来源的基线。已有发送任务继续处理，不清空数据库。API 不提供完整 X 时间线，普通动态、28 天挑战进展不在此模式的覆盖范围；预告与预测在日报里展示，不作为已执行重置通知。
+**新增重置通知：** 按 `poll.interval` 读取 `/api/v1/resets`，遵循游标分页、补抓窗口、限流冷却和现有发送重试。第一次成功建立独立静默基线，不把 API 历史刷到群里；切换来源不会复用 X 游标，也不会因 X 已见过相同帖子 ID 而漏掉后续 API 重置记录。再次切回沿用该来源的基线。已有发送任务继续处理，不清空数据库。API 不提供完整 X 时间线，普通动态、28 天挑战进展不在此模式的覆盖范围；`scheduled_reset` 待执行预告仍在日报里展示，不作为已执行重置通知。
+
+**可能重置提醒：** 每轮还读取 `/api/v1/status`，发现尚未过期的 `active_watch` 就向所有启用目标发送独立卡片；不需要开启日报或 debug。首次启动/升级时已有的有效预测也会通知，不受已执行重置的静默基线或补抓窗口限制。卡片展示 `elevated` / `strong` 信号、上游概率（缺失显示未知）、预测窗口、观测时间、有效期及来源，并明确标注“第三方 AI 预测，非官方承诺；不表示已执行重置”。不调用 TypeSafe。
+
+- 按**来源 + 观测时间**持久去重，同一预测跨轮询、重启、暂时消失后再出现都不重复推送；仅概率、文字或有效期修订不重发，新观测或新来源才产生新提醒。新启用目标不补发已发现的预测。
+- `null` 或发现时已过期的预测不入队；已入队任务沿用多目标限速和持久重试，保留原观测时间及有效期，不伪装为发送时的新预测。
+- `latest_reset` 是已执行重置，`scheduled_reset` 是待执行计划，`active_watch` 是预测；这三种状态不与 `regular` / `banked` 重置类型混用。历史和状态接口某一方失败时，另一方已取得的数据仍可入队，失败部分按冷却时间重试。
 
 **每日状态卡片：** 参考 Codex Resets 页面，突出距最近重置的时长、发生时间，展示重置次数、平均间隔、最长等待；有待执行预告或有效预测时一起展示。所有卡片附 [数据来源：Codex Resets](https://codex-resets.com) 链接。
 
@@ -183,6 +189,7 @@ TypeSafe Key 可在 [TypeSafe 控制台](https://console.typesafe.ai) 创建。�
 - 首次建立静默基线时也可以触发测试推送；最新一条早于补抓窗口时仍可用于测试，不扩大正常补抓范围。
 - 按发布时间和帖子 ID 判断最新，不直接取接口返回的第一项。抓取失败或没有可用帖子时不伪造测试消息。
 - X 模式每个新测试批次在推送前真实调用 TypeSafe，卡片展示该次概率；调用失败显示“暂不可用”，不填模拟值。API 模式则重发 `/status` 的最近重置记录，不调用 TypeSafe；没有记录不发送测试卡片。
+- API 模式本轮有新增重置或可能重置提醒时，不额外创建 debug 卡片；无新增时复用本轮 `/status` 返回的最近重置记录。
 - 调试任务独立入队，不修改正常帖子的去重记录。失败照常重试；同一目标还有未完成调试任务时，不重复积压新的测试批次，正常动态优先发送。
 - 去掉 `-debug` 并重启后停止创建调试推送；已经入队但尚未成功的任务仍按发送队列补发。此参数仅用于 `run`，不会开启 twscrape 的敏感详细日志。
 
@@ -263,7 +270,7 @@ make test-python PYTHON=/absolute/path/to/python
 go vet ./...
 ```
 
-测试不向 X/Codex Resets/飞书/TypeSafe 发送真实请求；新增 API 协议与分页、来源切换、时区/DST 调度、日报去重/重启/失败重试和卡片用离线模拟测试覆盖。TypeSafe HTTP 协议、概率渲染、debug 每批次重新评估和历史上下文用离线模拟测试覆盖。实际联网只读验证使用 `probe`；真实飞书推送必须单独执行 `test-send` 或启用 `run`。
+测试不向 X/Codex Resets/飞书/TypeSafe 发送真实请求；新增 API 协议与分页、来源切换、预测通知去重/过期/重启/失败隔离、时区/DST 调度、日报去重/重启/失败重试和卡片用离线模拟测试覆盖。TypeSafe HTTP 协议、概率渲染、debug 每批次重新评估和历史上下文用离线模拟测试覆盖。实际联网只读验证使用 `probe`；真实飞书推送必须单独执行 `test-send` 或启用 `run`。
 
 ## 完整性与运维边界
 

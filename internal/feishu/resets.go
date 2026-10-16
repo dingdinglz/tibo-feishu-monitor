@@ -24,6 +24,15 @@ func FormatCodexReset(r model.CodexReset, debug bool) (string, error) {
 	return encodeCard(cardRecord{Version: cardRecordVersion, CodexReset: &r, Debug: debug})
 }
 
+// FormatCodexWatch preserves a possible reset, never a confirmed reset or a
+// TypeSafe assessment. Retries retain the original observation and expiry.
+func FormatCodexWatch(w model.CodexWatch) (string, error) {
+	if !w.Valid() {
+		return "", errors.New("feishu: format_invalid_codex_watch")
+	}
+	return encodeCard(cardRecord{Version: cardRecordVersion, CodexWatch: &w})
+}
+
 // FormatCodexReport persists the entire snapshot, including its observation and
 // upstream generation times. Retries refresh credentials, never the report.
 func FormatCodexReport(r model.CodexReport) (string, error) {
@@ -110,6 +119,51 @@ func renderCodexReset(r model.CodexReset, debug bool, prefix, body string, trunc
 	return card
 }
 
+func codexWatchLevel(w model.CodexWatch) string {
+	if w.Level == "strong" {
+		return "较强信号"
+	}
+	return "关注信号"
+}
+
+func codexWatchProbability(w model.CodexWatch) string {
+	if w.ResetChancePercent == nil {
+		return "未知"
+	}
+	return strconv.Itoa(*w.ResetChancePercent) + "%"
+}
+
+func renderCodexWatch(w model.CodexWatch, prefix, body string, truncated bool) cardView {
+	card := codexCard(prefix, "Codex 可能重置提醒", "AI 预测 · "+codexWatchLevel(w)+" · "+codexTimestamp(w.ObservedAt, beijing)+"（北京时间）")
+	card.Header.Template = "orange"
+	prediction := []any{codexHero("可能重置 · 重置概率：" + codexWatchProbability(w))}
+	if window := codexSnippet(w.ForecastWindow, 60); window != "" {
+		prediction = append(prediction, codexText("预测窗口："+window, 2))
+	}
+	prediction = append(prediction,
+		secondary("观测时间："+codexTimestamp(w.ObservedAt, beijing)),
+		secondary("有效期至："+codexTimestamp(w.ExpiresAt, beijing)),
+		secondary("第三方 AI 预测，非官方承诺；不表示已执行重置。"),
+	)
+	if body == "" {
+		body = "上游未提供文字说明。"
+		if truncated {
+			body = "上游正文已省略，请查看来源。"
+		}
+	}
+	original := []any{codexText(body, 4)}
+	if truncated {
+		original = append(original, secondary("上游原文过长，已截断；请查看来源阅读完整内容。"))
+	}
+	original = append(original, secondary(codexSourceLabel(w.Source)), openButton("查看预测来源", w.Source.Link(), false))
+	card.Body.Elements = append(card.Body.Elements,
+		group("可能重置 / AI 预测", "orange-50", prediction...),
+		group("预测来源", "grey-50", original...),
+		group("数据来源", "default", secondary("固定预测快照；重试保留原观测时间及有效期。"), codexAttributionElement()),
+	)
+	return card
+}
+
 func renderCodexReport(r model.CodexReport, prefix string, snippetRunes int) cardView {
 	// Validated at the durable boundary. Do not consult the delivery clock here.
 	loc, _ := time.LoadLocation(r.Timezone)
@@ -162,15 +216,7 @@ func renderCodexReport(r model.CodexReport, prefix string, snippetRunes int) car
 		if len(upcoming) > 0 {
 			upcomingLabel = "待执行 / AI 预测"
 		}
-		level := "关注信号"
-		if watch.Level == "strong" {
-			level = "较强信号"
-		}
-		probability := "未知"
-		if watch.ResetChancePercent != nil {
-			probability = strconv.Itoa(*watch.ResetChancePercent) + "%"
-		}
-		upcoming = append(upcoming, paragraph("AI 预测 · "+level+" · 重置概率："+probability))
+		upcoming = append(upcoming, paragraph("AI 预测 · "+codexWatchLevel(*watch)+" · 重置概率："+codexWatchProbability(*watch)))
 		if window := codexSnippet(watch.ForecastWindow, min(snippetRunes, 60)); window != "" {
 			upcoming = append(upcoming, codexText("预测窗口："+window, 2))
 		}
