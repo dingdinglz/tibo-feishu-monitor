@@ -17,7 +17,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db       *sql.DB
+	delivery DeliveryPolicy
+}
 
 type ScanState struct {
 	Initialized        bool      `json:"initialized"`
@@ -69,6 +72,7 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at, length(id), id);
 CREATE TABLE IF NOT EXISTS codex_resets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS codex_watches (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS codex_scheduled_resets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reset_assessments (key TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contexts (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -179,7 +183,7 @@ func (s *Store) State(ctx context.Context) (ScanState, error) {
 type Formatter func(model.Post) ([]string, error)
 
 // ApplyScan atomically persists discoveries, per-destination parts and scan progress.
-// Existing posts NEVER create tasks for a newly registered destination.
+// Existing posts create no new tasks unless an explicit historical replay is active.
 func (s *Store) ApplyScan(ctx context.Context, result model.FetchResult, state ScanState, now, cutoff time.Time, format Formatter) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -218,7 +222,7 @@ func (s *Store) ApplyScan(ctx context.Context, result model.FetchResult, state S
 		if err != nil {
 			return 0, err
 		}
-		if n == 0 || p.CreatedAt.Before(cutoff) || p.CreatedAt.Before(state.Baseline) {
+		if (n == 0 && !s.delivery.Replay) || s.beforeDelivery(p.CreatedAt) || p.CreatedAt.Before(cutoff) || p.CreatedAt.Before(state.Baseline) {
 			continue
 		}
 		parts, err := format(p)
@@ -228,16 +232,27 @@ func (s *Store) ApplyScan(ctx context.Context, result model.FetchResult, state S
 		if len(parts) == 0 {
 			return 0, errors.New("formatter returned no parts")
 		}
+		queued := n > 0
 		for _, dest := range destinations {
+			var exists bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM outbox WHERE kind='post' AND post_id=? AND destination=?)", p.ID, dest).Scan(&exists); err != nil {
+				return 0, err
+			}
+			if exists {
+				continue
+			}
 			for part, text := range parts {
 				key := fmt.Sprintf("post:%s:%s:%d", p.ID, dest, part)
 				_, err = tx.ExecContext(ctx, `INSERT INTO outbox(dedup_key,destination,post_id,part,kind,body,created_at) VALUES(?,?,?,?, 'post',?,?)`, key, dest, p.ID, part, text, p.CreatedAt.UnixMilli())
 				if err != nil {
 					return 0, err
 				}
+				queued = true
 			}
 		}
-		added++
+		if queued {
+			added++
+		}
 	}
 	for _, c := range result.Contexts {
 		if !c.Available || c.ID == "" {
@@ -436,7 +451,8 @@ func (s *Store) Claim(ctx context.Context, dest string, now time.Time, interval 
 	var j Job
 	var next int64
 	err = tx.QueryRowContext(ctx, `SELECT id,destination,dedup_key,body,kind,attempts,next_attempt FROM outbox WHERE destination=? AND status='pending'
-ORDER BY CASE kind WHEN 'alert' THEN 0 WHEN 'debug' THEN 2 ELSE 1 END, created_at, length(post_id), post_id, part, id LIMIT 1`, dest).Scan(&j.ID, &j.Destination, &j.DedupKey, &j.Text, &j.Kind, &j.Attempts, &next)
+AND (created_at>=? OR (? AND kind='debug'))
+ORDER BY CASE kind WHEN 'alert' THEN 0 WHEN 'debug' THEN 2 ELSE 1 END, created_at, length(post_id), post_id, part, id LIMIT 1`, dest, s.deliveryMillis(), s.delivery.Debug).Scan(&j.ID, &j.Destination, &j.DedupKey, &j.Text, &j.Kind, &j.Attempts, &next)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

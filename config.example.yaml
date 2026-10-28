@@ -7,7 +7,8 @@ database: data/monitor.db
 source: x
 
 # Public, read-only API; no key, Python, X account or TypeSafe required.
-# Polls confirmed resets and active-watch predictions, even with daily reports disabled.
+# Polls executed resets, scheduled announcements and active watches, even without daily reports.
+# Only sends events since this startup by default; run --send-since explicitly allows history.
 codex_resets:
   timeout: 20s                 # whole status request / paginated history request
 

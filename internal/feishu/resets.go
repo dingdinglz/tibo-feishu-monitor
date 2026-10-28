@@ -33,6 +33,15 @@ func FormatCodexWatch(w model.CodexWatch) (string, error) {
 	return encodeCard(cardRecord{Version: cardRecordVersion, CodexWatch: &w})
 }
 
+// FormatCodexScheduledReset preserves an announced plan, not a completed reset.
+// Retries retain the original announcement and planned time.
+func FormatCodexScheduledReset(r model.CodexScheduledReset) (string, error) {
+	if !r.Valid() {
+		return "", errors.New("feishu: format_invalid_codex_scheduled_reset")
+	}
+	return encodeCard(cardRecord{Version: cardRecordVersion, CodexScheduledReset: &r})
+}
+
 // FormatCodexReport persists the entire snapshot, including its observation and
 // upstream generation times. Retries refresh credentials, never the report.
 func FormatCodexReport(r model.CodexReport) (string, error) {
@@ -160,6 +169,42 @@ func renderCodexWatch(w model.CodexWatch, prefix, body string, truncated bool) c
 		group("可能重置 / AI 预测", "orange-50", prediction...),
 		group("预测来源", "grey-50", original...),
 		group("数据来源", "default", secondary("固定预测快照；重试保留原观测时间及有效期。"), codexAttributionElement()),
+	)
+	return card
+}
+
+func renderCodexScheduledReset(r model.CodexScheduledReset, prefix, body string, truncated bool) cardView {
+	card := codexCard(prefix, "Codex 已安排重置提醒", codexSourceLabel(r.Source)+" · "+codexTimestamp(r.AnnouncedAt, beijing)+"（北京时间）")
+	kind := "常规重置"
+	if r.ResetType == "banked" {
+		kind = "备用重置额度发放"
+	}
+	planned := "待定"
+	if r.ScheduledFor != nil {
+		planned = codexTimestamp(*r.ScheduledFor, beijing)
+	}
+	// A plan never becomes a completed event merely because delivery is late.
+	card.Body.Elements = append(card.Body.Elements, group("待执行计划", "yellow-50",
+		codexHero("已安排 · "+kind), paragraph("计划时间："+planned),
+		secondary("上游已公告，尚未确认执行；计划时间已过也不代表已完成。"),
+		secondary("不代表个人账户额度状态。"),
+	))
+	if body == "" {
+		body = "上游未提供文字说明。"
+		if truncated {
+			body = "上游正文已省略，请查看来源。"
+		}
+	}
+	original := []any{codexText(body, 4)}
+	if truncated {
+		original = append(original, secondary("上游原文过长，已截断；请查看来源阅读完整内容。"))
+	}
+	original = append(original, secondary("记录 ID："+r.ID), openButton("查看计划来源", r.Source.Link(), false))
+	card.Body.Elements = append(card.Body.Elements,
+		group("计划来源", "grey-50", original...),
+		group("数据来源", "default",
+			secondary("公告时间："+codexTimestamp(r.AnnouncedAt, beijing)),
+			secondary("固定公告快照；重试保留原公告和计划时间。"), codexAttributionElement()),
 	)
 	return card
 }

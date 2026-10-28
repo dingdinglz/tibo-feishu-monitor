@@ -11,7 +11,7 @@ depends-on: [tibo-config, tibo-model, tibo-store, tibo-feishu, tibo-codex-resets
 
 ## 职责
 
-协调顺序采集循环、每目标发送 worker 和可选日报 worker；决定何时调用来源、提交状态、准备卡片及登记故障。静默基线、续抓、每日调度、debug 和推理缓存语义统一见 `tibo-architecture`。
+协调顺序采集循环、每目标发送 worker 和可选日报 worker；决定何时调用来源、提交状态、准备卡片及登记故障。启动时间边界、历史重放、续抓、每日调度、debug 和推理缓存语义统一见 `tibo-architecture`。启动各 worker 前一次性设置存储发送策略；直接调用轮询、日报或发送路径也必须完成同一初始化。
 
 外部抓取、发送、推理和 API 提供器通过接口注入；持久库和卡片格式器是具体依赖，不能把本包描述成完全隔离基础设施的纯领域层。API 客户端类型仅用于识别安全错误与冷却提示，不在这里实现 HTTP 协议。
 

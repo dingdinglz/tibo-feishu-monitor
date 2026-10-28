@@ -13,7 +13,7 @@ depends-on: [tibo-config, tibo-lock, tibo-model, tibo-monitor, tibo-store, tibo-
 
 拥有命令解析、启动检查、资源生命周期和具体适配器装配。`run` 才建立业务库、同步目标并启动编排；`status` 只读已存在业务库；`probe` 读取来源但不创建业务任务；`test-send` 必须同时指定目标和确认参数。
 
-X 模式检查 Python、脚本和账号库，并持有账号库锁；API 模式不做这些检查，也不装配推理客户端。启动时先取得业务库锁，再打开库和恢复队列。SIGINT/SIGTERM 通过共享 context 取消工作。
+X 模式检查 Python、脚本和账号库，并持有账号库锁；API 模式不做这些检查，也不装配推理客户端。启动时先取得业务库锁，再打开库和准备队列。入口在配置加载和预检前捕获 UTC 启动时间，并将它与可选的 `run --send-since` 传给编排层。显式起点必须是非空、非零、带时区且不晚于启动时间的 RFC3339 时间；非法参数在配置加载前拒绝。SIGINT/SIGTERM 通过共享 context 取消工作。
 
 ## 边界
 

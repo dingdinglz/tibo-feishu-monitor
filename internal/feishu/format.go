@@ -24,14 +24,15 @@ var loginName = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 // Persist content, not credentials, keyword prefixes or signatures. Render the
 // actual card on each attempt so changed prefixes and secrets also affect retries.
 type cardRecord struct {
-	Version     string                 `json:"tibo_card"`
-	Post        *model.Post            `json:"post,omitempty"`
-	Debug       bool                   `json:"debug,omitempty"`
-	Notice      string                 `json:"notice,omitempty"`
-	Reset       *model.ResetAssessment `json:"reset_assessment,omitempty"`
-	CodexReset  *model.CodexReset      `json:"codex_reset,omitempty"`
-	CodexWatch  *model.CodexWatch      `json:"codex_watch,omitempty"`
-	CodexReport *model.CodexReport     `json:"codex_report,omitempty"`
+	Version             string                     `json:"tibo_card"`
+	Post                *model.Post                `json:"post,omitempty"`
+	Debug               bool                       `json:"debug,omitempty"`
+	Notice              string                     `json:"notice,omitempty"`
+	Reset               *model.ResetAssessment     `json:"reset_assessment,omitempty"`
+	CodexReset          *model.CodexReset          `json:"codex_reset,omitempty"`
+	CodexWatch          *model.CodexWatch          `json:"codex_watch,omitempty"`
+	CodexScheduledReset *model.CodexScheduledReset `json:"codex_scheduled_reset,omitempty"`
+	CodexReport         *model.CodexReport         `json:"codex_report,omitempty"`
 }
 
 // CardPost returns the evidence for a post card, including debug replays. Text
@@ -141,6 +142,12 @@ func validCardRecord(record cardRecord) bool {
 	}
 	if record.CodexWatch != nil {
 		if !record.CodexWatch.Valid() || record.Debug {
+			return false
+		}
+		kinds++
+	}
+	if record.CodexScheduledReset != nil {
+		if !record.CodexScheduledReset.Valid() || record.Debug {
 			return false
 		}
 		kinds++

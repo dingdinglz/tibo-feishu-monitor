@@ -65,19 +65,25 @@ func (s *Store) ApplyCodexScan(ctx context.Context, resets []model.CodexReset, s
 		if err != nil {
 			return 0, err
 		}
-		if n == 0 || r.AnnouncedAt.Before(cutoff) || r.AnnouncedAt.Before(state.Baseline) {
+		if (n == 0 && !s.delivery.Replay) || s.beforeDelivery(r.AnnouncedAt) || r.AnnouncedAt.Before(cutoff) || r.AnnouncedAt.Before(state.Baseline) {
 			continue
 		}
 		body, err := format(r, false)
 		if err != nil {
 			return 0, err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO outbox(dedup_key,destination,kind,body,created_at)
+		result, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(dedup_key,destination,kind,body,created_at)
 SELECT ? || ':' || id,id,'reset',?,? FROM destinations WHERE enabled=1`, "reset:"+r.ID, body, r.AnnouncedAt.UnixMilli())
 		if err != nil {
 			return 0, err
 		}
-		added++
+		queued, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if n > 0 || queued > 0 {
+			added++
+		}
 	}
 	raw, err := json.Marshal(state)
 	if err != nil {
@@ -93,7 +99,7 @@ type WatchFormatter func(model.CodexWatch) (string, error)
 
 // Watches have no upstream ID. The source and observation instant identify an
 // event; edits to its probability/text/expiry do not replay the same signal.
-// Unlike reset history, a currently active watch is useful even on first run.
+// The delivery boundary applies to the observation, not its expiry.
 func (s *Store) QueueCodexWatch(ctx context.Context, watch *model.CodexWatch, now time.Time, format WatchFormatter) (int, error) {
 	if watch == nil {
 		return 0, nil
@@ -101,7 +107,7 @@ func (s *Store) QueueCodexWatch(ctx context.Context, watch *model.CodexWatch, no
 	if !watch.Valid() {
 		return 0, errors.New("invalid reset watch")
 	}
-	if !watch.ExpiresAt.After(now) {
+	if !watch.ExpiresAt.After(now) || s.beforeDelivery(watch.ObservedAt) {
 		return 0, nil
 	}
 	identity, err := json.Marshal(struct {
@@ -126,18 +132,40 @@ func (s *Store) QueueCodexWatch(ctx context.Context, watch *model.CodexWatch, no
 		return 0, err
 	}
 	n, err := result.RowsAffected()
-	if err != nil || n == 0 {
+	if err != nil || (n == 0 && !s.delivery.Replay) {
 		return 0, err
+	}
+	if n == 0 {
+		if err := tx.QueryRowContext(ctx, "SELECT data FROM codex_watches WHERE id=?", id).Scan(&raw); err != nil {
+			return 0, err
+		}
+		var saved model.CodexWatch
+		if err := json.Unmarshal(raw, &saved); err != nil {
+			return 0, err
+		}
+		watch = &saved
+		if !watch.ExpiresAt.After(now) {
+			return 0, nil
+		}
 	}
 	body, err := format(*watch)
 	if err != nil {
 		return 0, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO outbox(dedup_key,destination,kind,body,created_at)
-SELECT ? || ':' || id,id,'watch',?,? FROM destinations WHERE enabled=1`, "watch:"+id, body, watch.ObservedAt.UnixMilli()); err != nil {
+	result, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(dedup_key,destination,kind,body,created_at)
+SELECT ? || ':' || id,id,'watch',?,? FROM destinations WHERE enabled=1`, "watch:"+id, body, watch.ObservedAt.UnixMilli())
+	if err != nil {
 		return 0, err
 	}
-	return 1, tx.Commit()
+	queued, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	added := 0
+	if n > 0 || queued > 0 {
+		added = 1
+	}
+	return added, tx.Commit()
 }
 
 func (s *Store) QueueCodexDebug(ctx context.Context, reset model.CodexReset, now time.Time, format ResetFormatter) (int, error) {

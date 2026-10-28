@@ -36,8 +36,9 @@ func main() {
 }
 
 func execute(ctx context.Context, args []string, log *slog.Logger) error {
+	startedAt := time.Now().UTC()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: tibo-monitor <run|probe|status|test-send> -config config.yaml\n  run [-debug]  Monitor continuously; -debug resends the latest post when no new posts are found\n  probe     Read the selected source (X scan or Codex report); no DB changes or Feishu messages\n  status    Show persisted progress and pending deliveries\n  test-send -destination ID -confirm    Send ONE explicit test message")
+		fmt.Println("Usage: tibo-monitor <run|probe|status|test-send> -config config.yaml\n  run [--send-since RFC3339] [--debug]  Monitor continuously; ordinary notifications default to posts since this startup\n    --send-since sets an explicit historical start (timezone required)\n    --debug independently resends the latest historical post as DEBUG when no new posts are found; ordinary notifications remain restricted\n  probe     Read the selected source (X scan or Codex report); no DB changes or Feishu messages\n  status    Show persisted progress and pending deliveries\n  test-send -destination ID -confirm    Send ONE explicit test message")
 		return nil
 	}
 	command := args[0]
@@ -49,15 +50,30 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	destination := fs.String("destination", "", "test-send destination ID")
 	confirm := fs.Bool("confirm", false, "explicitly allow one test message")
 	pages := fs.Int("pages", 0, "probe-only page budget override (at least 2)")
-	debug := fs.Bool("debug", false, "run-only: resend the latest post as a DEBUG test when no new posts are found")
+	debug := fs.Bool("debug", false, "run-only: independently resend the latest historical post as DEBUG when no new posts are found; does not relax ordinary notifications' startup/send-since boundary")
+	sendSinceValue := fs.String("send-since", "", "run-only: explicit historical start in RFC3339 (fractional seconds supported, timezone required); ordinary notifications default to this startup")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
-	if (*pages != 0 && command != "probe") || ((*confirm || *destination != "") && command != "test-send") || (*debug && command != "run") {
+	sendSinceSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "send-since" {
+			sendSinceSet = true
+		}
+	})
+	if (*pages != 0 && command != "probe") || ((*confirm || *destination != "") && command != "test-send") || (*debug && command != "run") || (sendSinceSet && command != "run") {
 		return errors.New("flag is not supported for this command")
+	}
+	var sendSince time.Time
+	if sendSinceSet {
+		var err error
+		sendSince, err = parseSendSince(*sendSinceValue, startedAt)
+		if err != nil {
+			return err
+		}
 	}
 	c, err := config.Load(*path, command == "probe" || command == "status")
 	if err != nil {
@@ -165,7 +181,7 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 	if upgraded > 0 {
 		log.Info("pending_posts_upgraded_to_cards", "deliveries", upgraded)
 	}
-	m := monitor.Monitor{Config: c, Store: s, Fetcher: fetcher, ResetProvider: resetProvider, Sender: feishu.New(c.Delivery.Timeout), Log: log, Debug: *debug}
+	m := monitor.Monitor{Config: c, Store: s, Fetcher: fetcher, ResetProvider: resetProvider, Sender: feishu.New(c.Delivery.Timeout), Log: log, Debug: *debug, StartedAt: startedAt, SendSince: sendSince}
 	if !c.UsesCodexResets() {
 		m.Assessor = typesafe.New(c.TypeSafe)
 		if c.TypeSafe.APIKey == "" {
@@ -175,8 +191,24 @@ func execute(ctx context.Context, args []string, log *slog.Logger) error {
 			log.Warn("daily_report_inactive", "reason", "daily reports require source: codex-resets")
 		}
 	}
-	log.Info("monitor_started", "source", c.Source, "target", c.Target.Username, "interval", c.Poll.Interval, "jitter", "1s..30s", "debug", *debug)
+	effectiveSendSince := sendSince
+	if effectiveSendSince.IsZero() {
+		effectiveSendSince = startedAt
+	}
+	log.Info("monitor_started", "source", c.Source, "target", c.Target.Username, "interval", c.Poll.Interval, "jitter", "1s..30s", "debug", *debug,
+		"started_at", startedAt.Format(time.RFC3339Nano), "send_since", effectiveSendSince.Format(time.RFC3339Nano))
 	return m.Run(ctx)
+}
+
+func parseSendSince(value string, startedAt time.Time) (time.Time, error) {
+	since, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || since.IsZero() {
+		return time.Time{}, errors.New("send-since must be a non-empty, non-zero RFC3339 timestamp with a timezone")
+	}
+	if since.After(startedAt) {
+		return time.Time{}, errors.New("send-since must not be later than startup time")
+	}
+	return since.UTC(), nil
 }
 
 func preflight(c *config.Config, log *slog.Logger) error {

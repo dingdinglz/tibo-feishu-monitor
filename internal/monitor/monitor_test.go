@@ -140,6 +140,7 @@ func (s independentSender) Send(ctx context.Context, d config.Destination, _ str
 func TestSlowScrapeAndTargetDoNotBlockHealthyTarget(t *testing.T) {
 	m, _ := newTest(t)
 	now := time.Now().Add(-time.Hour)
+	m.StartedAt = now.Add(-time.Second) // This is an in-run delivery, not old startup backlog.
 	_, err := m.Store.ApplyScan(context.Background(), model.FetchResult{Posts: []model.Post{fixture("42", now)}}, store.ScanState{Initialized: true, Baseline: now}, now, now, func(model.Post) ([]string, error) { return []string{"test"}, nil })
 	if err != nil {
 		t.Fatal(err)

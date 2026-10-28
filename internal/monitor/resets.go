@@ -40,8 +40,12 @@ func (m *Monitor) pollResets(ctx context.Context, now time.Time) (PollResult, er
 	if m.ResetProvider == nil {
 		return outcome, errors.New("codex-resets provider is not configured")
 	}
-	cutoff := now.Add(-m.Config.Poll.CatchUpWindow)
-	if state.Initialized && state.LastComplete.Before(cutoff) {
+	cutoff := m.scanCutoff(now)
+	last := state.LastComplete
+	if last.Before(m.StartedAt) {
+		last = m.StartedAt
+	}
+	if state.Initialized && last.Before(cutoff) {
 		if err := m.fault(ctx, "codex_window", "距离上次 API 采集已超过补抓窗口，窗口外的重置记录不再自动补发。", "", 1); err != nil {
 			return outcome, err
 		}
@@ -58,9 +62,9 @@ func (m *Monitor) pollResets(ctx context.Context, now time.Time) (PollResult, er
 		}
 		if !state.Initialized {
 			state.Initialized = true
-			state.Baseline = now
-			m.Log.Info("baseline_established", "source", config.SourceCodexResets, "since", now)
+			m.Log.Info("baseline_established", "source", config.SourceCodexResets, "since", m.deliverySince())
 		}
+		state.Baseline = m.deliverySince()
 		state.LastComplete, state.LastRequestSuccess = now, now
 		outcome.Added, err = m.Store.ApplyCodexScan(ctx, resets, state, now, cutoff, feishu.FormatCodexReset)
 		if err != nil {
@@ -79,12 +83,17 @@ func (m *Monitor) pollResets(ctx context.Context, now time.Time) (PollResult, er
 		outcome.RetryAfter = max(outcome.RetryAfter, failure.RetryAfter)
 		return outcome, err
 	}
+	newScheduled, err := m.Store.QueueCodexScheduledReset(ctx, status.ScheduledReset, feishu.FormatCodexScheduledReset)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.Added += newScheduled
 	newWatches, err := m.Store.QueueCodexWatch(ctx, status.ActiveWatch, now, feishu.FormatCodexWatch)
 	if err != nil {
 		return outcome, err
 	}
 	outcome.Added += newWatches
-	if err := m.Store.Recover(ctx, "codex_status", "Codex Resets 状态及预测读取已恢复。", now); err != nil {
+	if err := m.Store.Recover(ctx, "codex_status", "Codex Resets 状态、计划及预测读取已恢复。", now); err != nil {
 		return outcome, err
 	}
 	if m.Debug && historyErr == nil && outcome.Added == 0 {
@@ -100,7 +109,7 @@ func (m *Monitor) pollResets(ctx context.Context, now time.Time) (PollResult, er
 		}
 	}
 	outcome.Success = historyErr == nil
-	m.Log.Info("poll_finished", "source", config.SourceCodexResets, "new_resets", newResets, "new_watches", newWatches)
+	m.Log.Info("poll_finished", "source", config.SourceCodexResets, "new_resets", newResets, "new_scheduled", newScheduled, "new_watches", newWatches)
 	return outcome, nil
 }
 
@@ -171,12 +180,17 @@ func BuildCodexReport(ctx context.Context, provider ResetProvider, now time.Time
 // QueueDailyReport can be safely called after restart or repeatedly on the same
 // date. API failures do not consume the day's slot; the outbox owns retries.
 func (m *Monitor) QueueDailyReport(ctx context.Context, now time.Time) (PollResult, error) {
+	m.initDelivery(now)
 	outcome := PollResult{Success: true}
 	if !m.Config.UsesCodexResets() || !m.Config.DailyReport.Enabled {
 		return outcome, nil
 	}
 	date, due, err := dailyDate(now, m.Config.DailyReport)
 	if err != nil || !due {
+		return outcome, err
+	}
+	scheduled, err := dailyScheduledAt(now, m.Config.DailyReport)
+	if err != nil || scheduled.IsZero() || scheduled.Before(m.deliverySince()) {
 		return outcome, err
 	}
 	needed, err := m.Store.DailyReportNeeded(ctx, date)

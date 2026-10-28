@@ -16,7 +16,7 @@ func watchFixture(now time.Time) *model.CodexWatch {
 	chance := 40
 	return &model.CodexWatch{
 		Level: "elevated", ResetChancePercent: &chance, ForecastWindow: "within 24h",
-		ObservedAt: now.Add(-48 * time.Hour), ExpiresAt: now.Add(24 * time.Hour),
+		ObservedAt: now, ExpiresAt: now.Add(24 * time.Hour),
 		Text: "possible reset", Source: model.CodexSource{Type: "observed"},
 	}
 }
@@ -24,11 +24,11 @@ func watchFixture(now time.Time) *model.CodexWatch {
 func TestCodexWatchPolledWithoutDailyOrDebug(t *testing.T) {
 	m, f, now := newResetTest(t)
 	m.Config.DailyReport.Enabled = false
-	f.status.ActiveWatch = watchFixture(now) // Older than baseline/catch-up, but still active.
+	f.status.ActiveWatch = watchFixture(now) // Announced at this run's startup boundary.
 	ctx := context.Background()
 	out, err := m.Poll(ctx, now)
 	if err != nil || !out.Success || out.Added != 1 || f.statusCalls != 1 || f.historyCalls != 1 {
-		t.Fatal("active watch requires daily report/debug or was baselined away", out, err)
+		t.Fatal("new watch requires daily report/debug or was baselined away", out, err)
 	}
 	for _, dest := range []string{"a", "b"} {
 		job, err := m.Store.Claim(ctx, dest, now, time.Second)
@@ -64,17 +64,21 @@ func TestCodexWatchPolledWithoutDailyOrDebug(t *testing.T) {
 
 func TestCodexWatchExpiredAndScheduledAreNotConfirmedResets(t *testing.T) {
 	m, f, now := newResetTest(t)
-	f.status.ActiveWatch = watchFixture(now)
+	f.status.ActiveWatch = watchFixture(now.Add(-time.Hour))
 	f.status.ActiveWatch.ExpiresAt = now
 	past := now.Add(-time.Hour)
 	f.status.ScheduledReset = &model.CodexScheduledReset{
-		ID: "pending", Status: "scheduled", ResetType: "regular", AnnouncedAt: past,
+		ID: "pending", Status: "scheduled", ResetType: "regular", AnnouncedAt: now,
 		ScheduledFor: &past, Source: model.CodexSource{Type: "observed"},
 	}
 	out, err := m.Poll(context.Background(), now)
 	st, statusErr := m.Store.Status(context.Background())
-	if err != nil || statusErr != nil || !out.Success || out.Added != 0 || st.Pending != 0 {
-		t.Fatal("expired watch/past schedule became a reset notification", out, st, err, statusErr)
+	if err != nil || statusErr != nil || !out.Success || out.Added != 1 || st.Pending != 2 {
+		t.Fatal("expired watch notified or scheduled announcement was lost", out, st, err, statusErr)
+	}
+	job, err := m.Store.Claim(context.Background(), "a", now, time.Second)
+	if err != nil || job == nil || job.Kind != "scheduled" {
+		t.Fatal("past schedule became a confirmed reset", job, err)
 	}
 }
 

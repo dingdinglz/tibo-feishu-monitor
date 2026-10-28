@@ -35,6 +35,10 @@ type Monitor struct {
 	Log           *slog.Logger
 	Debug         bool
 	Assessor      Assessor
+	StartedAt     time.Time // captured before CLI startup work; fixed for this run
+	SendSince     time.Time // explicit historical override; zero means StartedAt
+	deliveryOnce  sync.Once
+	scanStarted   bool
 	assessmentMu  sync.Mutex // coalesce per-post/multi-destination inference before sending
 }
 
@@ -83,6 +87,7 @@ func (m *Monitor) fault(ctx context.Context, key, detail, exclude string, thresh
 }
 
 func (m *Monitor) Poll(ctx context.Context, now time.Time) (PollResult, error) {
+	m.initDelivery(now)
 	if m.Config.UsesCodexResets() {
 		return m.pollResets(ctx, now)
 	}
@@ -96,8 +101,12 @@ func (m *Monitor) Poll(ctx context.Context, now time.Time) (PollResult, error) {
 	if err != nil {
 		return outcome, err
 	}
-	cutoff := now.Add(-c.Poll.CatchUpWindow)
+	cutoff := m.scanCutoff(now)
 	since := cutoff
+	if !m.scanStarted {
+		state.Cursor = ""
+		state.ScanSince, state.ScanStarted = time.Time{}, time.Time{}
+	}
 	cursor := state.Cursor
 	if cursor != "" && !state.ScanStarted.Before(cutoff) {
 		since = state.ScanSince
@@ -110,6 +119,9 @@ func (m *Monitor) Poll(ctx context.Context, now time.Time) (PollResult, error) {
 	last := state.LastComplete
 	if last.IsZero() {
 		last = state.Baseline
+	}
+	if last.Before(m.StartedAt) {
+		last = m.StartedAt
 	}
 	if state.Initialized && last.Before(cutoff) {
 		if err := m.fault(ctx, "window", "距离上次完整采集已超过补抓窗口，窗口外可能有未抓取消息。", "", 1); err != nil {
@@ -128,9 +140,9 @@ func (m *Monitor) Poll(ctx context.Context, now time.Time) (PollResult, error) {
 	if res.HeadOK {
 		if !state.Initialized {
 			state.Initialized = true
-			state.Baseline = now
-			m.Log.Info("baseline_established", "since", now)
+			m.Log.Info("baseline_established", "since", m.deliverySince())
 		}
+		state.Baseline = m.deliverySince()
 		state.LastRequestSuccess = now
 		state.Cursor = res.Cursor
 		if res.Cursor != "" {
@@ -149,6 +161,7 @@ func (m *Monitor) Poll(ctx context.Context, now time.Time) (PollResult, error) {
 		if err != nil {
 			return outcome, err
 		}
+		m.scanStarted = true
 		if res.Complete && fetchErr == nil {
 			if err := m.Store.Recover(ctx, "coverage", "最近窗口的采集已恢复完整覆盖（以 X 实际返回的数据为准）。", now); err != nil {
 				return outcome, err
@@ -220,6 +233,7 @@ func wait(ctx context.Context, delay time.Duration) bool {
 }
 
 func (m *Monitor) deliver(ctx context.Context, d config.Destination) error {
+	m.initDelivery(time.Now().UTC())
 	for ctx.Err() == nil {
 		job, err := m.Store.Claim(ctx, d.ID, time.Now(), m.Config.Delivery.SendInterval)
 		if err != nil {
@@ -279,6 +293,7 @@ func (m *Monitor) deliver(ctx context.Context, d config.Destination) error {
 // Run schedules the next fetch only AFTER the previous one finishes. Delivery
 // workers are independent, so one slow/failed webhook cannot block other targets.
 func (m *Monitor) Run(ctx context.Context) error {
+	m.initDelivery(time.Now().UTC())
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup

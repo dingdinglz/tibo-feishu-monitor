@@ -223,6 +223,7 @@ func (f blockingResetPoll) Resets(ctx context.Context, from time.Time) ([]model.
 func TestDailySchedulerIndependentOfPolling(t *testing.T) {
 	m, _, _ := newResetTest(t)
 	m.Config.DailyReport.Time = "00:00"
+	m.StartedAt = time.Now().UTC().Add(-24 * time.Hour) // Already running before today's schedule.
 	m.ResetProvider = blockingResetPoll{status: model.CodexStatus{GeneratedAt: time.Now().UTC()}}
 	delivered := make(chan string, 2)
 	m.Sender = independentSender{delivered: delivered}

@@ -119,6 +119,9 @@ func renderCard(record cardRecord, prefix, body string, truncated bool) cardView
 	if record.CodexWatch != nil {
 		return renderCodexWatch(*record.CodexWatch, prefix, body, truncated)
 	}
+	if record.CodexScheduledReset != nil {
+		return renderCodexScheduledReset(*record.CodexScheduledReset, prefix, body, truncated)
+	}
 	var card cardView
 	card.Schema = "2.0"
 	card.Config.WidthMode = "default"
@@ -209,6 +212,8 @@ func (c *Client) cardBody(prefix, secret string, record cardRecord) ([]byte, err
 			text = record.CodexReset.Text
 		} else if record.CodexWatch != nil {
 			text = record.CodexWatch.Text
+		} else if record.CodexScheduledReset != nil {
+			text = record.CodexScheduledReset.Text
 		}
 		runes := []rune(text)
 		limit = len(runes)

@@ -197,6 +197,7 @@ func TestDeliveryActuallyPreparesPostReplyAndQuoteBeforeSend(t *testing.T) {
 			a := &recordingAssessor{}
 			m.Assessor = a
 			now := time.Now().Add(-time.Hour)
+			m.StartedAt = now.Add(-time.Second)
 			p := fixture("10", now)
 			p.Kind = kind
 			if _, err := m.Store.ApplyScan(context.Background(), model.FetchResult{Posts: []model.Post{p}}, store.ScanState{Initialized: true, Baseline: now}, now, now, feishu.Format); err != nil {
