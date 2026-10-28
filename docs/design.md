@@ -1,3 +1,11 @@
+---
+id: tibo-architecture
+type: architecture-design
+title: 设计与运行语义
+status: draft
+parent: tibo-goals
+---
+
 # 设计与运行语义
 
 本文件记录采集、去重、发送与故障恢复的约定，便于维护时检查行为是否发生变化。
